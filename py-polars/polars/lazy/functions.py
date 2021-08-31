@@ -10,6 +10,7 @@ try:
     from polars.polars import argsort_by as pyargsort_by
     from polars.polars import binary_function as pybinary_function
     from polars.polars import col as pycol
+    from polars.polars import cols as pycols
     from polars.polars import concat_str as _concat_str
     from polars.polars import cov as pycov
     from polars.polars import fold as pyfold
@@ -21,7 +22,7 @@ try:
 except ImportError:
     _DOCUMENTING = True
 
-from ..datatypes import DataType, Date64, Int64
+from ..datatypes import DataType, Int64
 
 __all__ = [
     "col",
@@ -53,12 +54,10 @@ __all__ = [
     "arange",
     "argsort_by",
     "concat_str",
-    "UDF",  # deprecated
-    "udf",  # deprecated
 ]
 
 
-def col(name: str) -> "pl.Expr":
+def col(name: Union[str, tp.List[str]]) -> "pl.Expr":
     """
     A column in a DataFrame.
     Can be used to select:
@@ -130,8 +129,23 @@ def col(name: str) -> "pl.Expr":
     ├╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌┤
     │ 33        ┆ 1   │
     ╰───────────┴─────╯
+    >>> df.select(col(["hamburger", "foo"])
+    shape: (3, 2)
+    ╭───────────┬─────╮
+    │ hamburger ┆ foo │
+    │ ---       ┆ --- │
+    │ i64       ┆ i64 │
+    ╞═══════════╪═════╡
+    │ 11        ┆ 3   │
+    ├╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌┤
+    │ 22        ┆ 2   │
+    ├╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌┤
+    │ 33        ┆ 1   │
+    ╰───────────┴─────╯
 
     """
+    if isinstance(name, list):
+        return pl.lazy.expr.wrap_expr(pycols(name))
     return pl.lazy.expr.wrap_expr(pycol(name))
 
 
@@ -374,7 +388,7 @@ def lit(
     >>> lit(Series("a", [1, 2, 3])
     """
     if isinstance(value, datetime):
-        return lit(int(value.timestamp() * 1e3)).cast(Date64)
+        return lit(pl.Series("literal", [value]))
 
     if isinstance(value, pl.Series):
         name = value.name
@@ -481,6 +495,7 @@ def fold(
         Expressions to aggregate over. May also be a wildcard expression.
     """
     # in case of pl.col("*")
+    acc = pl.lazy.expr.expr_to_lit_or_expr(acc, str_to_lit=True)
     if isinstance(exprs, pl.Expr):
         exprs = [exprs]
 
@@ -538,25 +553,6 @@ def quantile(column: str, quantile: float) -> "pl.Expr":
     Syntactic sugar for `column("foo").quantile(..)`.
     """
     return col(column).quantile(quantile)
-
-
-class UDF:
-    """
-    Deprecated: don't use me
-    """
-
-    def __init__(
-        self, f: Callable[["pl.Series"], "pl.Series"], return_dtype: Type[DataType]
-    ):
-        self.f = f
-        self.return_dtype = return_dtype
-
-
-def udf(f: Callable[["pl.Series"], "pl.Series"], return_dtype: Type[DataType]) -> UDF:
-    """
-    Deprecated: don't use me
-    """
-    return UDF(f, return_dtype)
 
 
 def arange(

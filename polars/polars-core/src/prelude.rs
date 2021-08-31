@@ -26,7 +26,7 @@ pub use crate::{
         },
         comparison::NumComp,
         iterator::{IntoNoNullIterator, PolarsIterator},
-        ops::{aggregate::*, chunkops::ChunkOps, window::InitFold, *},
+        ops::{aggregate::*, chunkops::ChunkOps, *},
         ChunkedArray,
     },
     datatypes,
@@ -41,3 +41,9 @@ pub use crate::{
     utils::IntoVec,
     vector_hasher::VecHash,
 };
+
+#[cfg(feature = "rolling_window")]
+pub use crate::chunked_array::ops::rolling_window::InitFold;
+
+#[cfg(feature = "rank")]
+pub use crate::chunked_array::ops::unique::rank::RankMethod;

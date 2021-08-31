@@ -1,8 +1,7 @@
 use crate::csv::{CsvEncoding, NullValues};
 use crate::csv_core::utils::*;
 use crate::csv_core::{buffer::*, parser::*};
-use crate::mmap::MmapBytesReader;
-use crate::utils::resolve_homedir;
+use crate::mmap::ReaderBytes;
 use crate::PhysicalIoExpr;
 use crate::ScanAggregation;
 use polars_arrow::array::*;
@@ -12,20 +11,16 @@ use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use std::borrow::Cow;
 use std::fmt;
-#[cfg(feature = "decompress")]
-use std::io::SeekFrom;
-use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{atomic::AtomicUsize, Arc};
 
 /// CSV file reader
-pub struct CoreReader<'a, R: MmapBytesReader> {
+pub struct CoreReader<'a> {
+    reader_bytes: Option<ReaderBytes<'a>>,
     /// Explicit schema for the CSV file
     schema: Cow<'a, Schema>,
     /// Optional projection for which columns to load (zero-based column indices)
     projection: Option<Vec<usize>>,
-    /// File reader
-    reader: Option<R>,
     /// Current line number, used in error reporting
     line_number: usize,
     ignore_parser_errors: bool,
@@ -33,7 +28,6 @@ pub struct CoreReader<'a, R: MmapBytesReader> {
     n_rows: Option<usize>,
     encoding: CsvEncoding,
     n_threads: Option<usize>,
-    path: Option<PathBuf>,
     has_header: bool,
     delimiter: u8,
     sample_size: usize,
@@ -41,15 +35,11 @@ pub struct CoreReader<'a, R: MmapBytesReader> {
     low_memory: bool,
     comment_char: Option<u8>,
     null_values: Option<Vec<String>>,
-    /// If schema was given by user or inferred
-    #[cfg(feature = "decompress")]
-    inferred_schema: bool,
+    predicate: Option<Arc<dyn PhysicalIoExpr>>,
+    aggregate: Option<&'a [ScanAggregation]>,
 }
 
-impl<'a, R> fmt::Debug for CoreReader<'a, R>
-where
-    R: MmapBytesReader,
-{
+impl<'a> fmt::Debug for CoreReader<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Reader")
             .field("schema", &self.schema)
@@ -107,7 +97,7 @@ impl RunningSize {
     }
 }
 
-impl<'a, R: MmapBytesReader> CoreReader<'a, R> {
+impl<'a> CoreReader<'a> {
     fn find_starting_point<'b>(&self, mut bytes: &'b [u8]) -> Result<&'b [u8]> {
         // Skip all leading white space and the occasional utf8-bom
         bytes = skip_line_ending(skip_whitespace(skip_bom(bytes)).0).0;
@@ -278,8 +268,9 @@ impl<'a, R: MmapBytesReader> CoreReader<'a, R> {
                         let mut read = bytes_offset_thread;
                         let mut df: Option<DataFrame> = None;
 
+                        let mut last_read = usize::MAX;
                         loop {
-                            if read >= stop_at_nbytes {
+                            if read >= stop_at_nbytes || read == last_read {
                                 break;
                             }
 
@@ -293,6 +284,7 @@ impl<'a, R: MmapBytesReader> CoreReader<'a, R> {
 
                             let local_bytes = &bytes[read..stop_at_nbytes];
 
+                            last_read = read;
                             read = parse_lines(
                                 local_bytes,
                                 read,
@@ -306,6 +298,7 @@ impl<'a, R: MmapBytesReader> CoreReader<'a, R> {
                                 chunk_size,
                             )?;
 
+                            self.may_parse_last_line(read, bytes, projection, &mut buffers)?;
                             let mut local_df = DataFrame::new_no_checks(
                                 buffers.into_iter().map(|buf| buf.into_series()).collect(),
                             );
@@ -392,12 +385,14 @@ impl<'a, R: MmapBytesReader> CoreReader<'a, R> {
                             self.delimiter,
                         )?;
 
+                        let mut last_read = usize::MAX;
                         loop {
-                            if read >= stop_at_nbytes {
+                            if read >= stop_at_nbytes || read == last_read {
                                 break;
                             }
                             let local_bytes = &bytes[read..stop_at_nbytes];
 
+                            last_read = read;
                             read = parse_lines(
                                 local_bytes,
                                 read,
@@ -413,6 +408,7 @@ impl<'a, R: MmapBytesReader> CoreReader<'a, R> {
                                 chunk_size * 320000,
                             )?;
                         }
+                        self.may_parse_last_line(read, bytes, projection, &mut buffers)?;
                         Ok(DataFrame::new_no_checks(
                             buffers.into_iter().map(|buf| buf.into_series()).collect(),
                         ))
@@ -423,67 +419,48 @@ impl<'a, R: MmapBytesReader> CoreReader<'a, R> {
         }
     }
 
-    #[cfg(feature = "decompress")]
-    fn decompress_and_parse(
-        &mut self,
-        predicate: Option<Arc<dyn PhysicalIoExpr>>,
-        n_threads: usize,
+    // the parser and some unsafe code assumes '\n' char
+    fn may_parse_last_line(
+        &self,
+        read: usize,
         bytes: &[u8],
-    ) -> Result<DataFrame> {
-        if let Some(bytes) = decompress(bytes) {
-            if self.inferred_schema {
-                self.schema = Cow::Owned(bytes_to_schema(
-                    &bytes,
-                    self.delimiter,
-                    self.has_header,
-                    self.skip_rows,
-                    self.comment_char,
-                )?);
-            }
+        projection: &[usize],
+        buffers: &mut [Buffer],
+    ) -> Result<()> {
+        let remaining = &bytes[read..];
+        let len = remaining.len();
+        // if there is no new line char we try to parse the last line
+        if len > 0 && !remaining.iter().any(|&c| c == b'\n') {
+            let mut last_line = Vec::with_capacity(len + 1);
+            last_line.extend_from_slice(remaining);
+            last_line.push(b'\n');
 
-            self.parse_csv(n_threads, &bytes, predicate.as_ref())
-        } else {
-            self.parse_csv(n_threads, bytes, predicate.as_ref())
+            parse_lines(
+                &last_line,
+                0,
+                self.delimiter,
+                self.comment_char,
+                self.null_values.as_ref(),
+                projection,
+                buffers,
+                self.ignore_parser_errors,
+                self.encoding,
+                // does not matter
+                10,
+            )?;
         }
+        Ok(())
     }
 
     /// Read the csv into a DataFrame. The predicate can come from a lazy physical plan.
-    pub fn as_df(
-        &mut self,
-        predicate: Option<Arc<dyn PhysicalIoExpr>>,
-        aggregate: Option<&[ScanAggregation]>,
-    ) -> Result<DataFrame> {
+    pub fn as_df(&mut self) -> Result<DataFrame> {
+        let predicate = self.predicate.take();
+        let aggregate = self.aggregate.take();
         let n_threads = self.n_threads.unwrap_or_else(|| POOL.current_num_threads());
 
-        let mut df = match &self.path {
-            // we have a path so we can mmap
-            Some(p) => {
-                let p = resolve_homedir(p);
-                let file = std::fs::File::open(&p)?;
-                let mmap = unsafe { memmap::Mmap::map(&file)? };
-                let bytes = mmap[..].as_ref();
+        let reader_bytes = self.reader_bytes.take().unwrap();
 
-                #[cfg(feature = "decompress")]
-                {
-                    self.decompress_and_parse(predicate, n_threads, bytes)?
-                }
-
-                #[cfg(not(feature = "decompress"))]
-                self.parse_csv(n_threads, bytes, predicate.as_ref())?
-            }
-            None => {
-                let mut reader = self.reader.take().unwrap();
-                let bytes = &get_reader_bytes(&mut reader)?;
-
-                #[cfg(feature = "decompress")]
-                {
-                    self.decompress_and_parse(predicate, n_threads, bytes)?
-                }
-
-                #[cfg(not(feature = "decompress"))]
-                self.parse_csv(n_threads, bytes, predicate.as_ref())?
-            }
-        };
+        let mut df = self.parse_csv(n_threads, &reader_bytes, predicate.as_ref())?;
 
         if let Some(aggregate) = aggregate {
             let cols = aggregate
@@ -505,8 +482,9 @@ impl<'a, R: MmapBytesReader> CoreReader<'a, R> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn build_csv_reader<'a, R: MmapBytesReader>(
-    mut reader: R,
+pub fn build_csv_reader<'a>(
+    #[cfg(feature = "decompress")] mut reader_bytes: ReaderBytes<'a>,
+    #[cfg(not(feature = "decompress"))] reader_bytes: ReaderBytes<'a>,
     n_rows: Option<usize>,
     skip_rows: usize,
     mut projection: Option<Vec<usize>>,
@@ -518,21 +496,20 @@ pub fn build_csv_reader<'a, R: MmapBytesReader>(
     columns: Option<Vec<String>>,
     encoding: CsvEncoding,
     n_threads: Option<usize>,
-    path: Option<PathBuf>,
     schema_overwrite: Option<&'a Schema>,
+    dtype_overwrite: Option<&'a [DataType]>,
     sample_size: usize,
     chunk_size: usize,
     low_memory: bool,
     comment_char: Option<u8>,
     null_values: Option<NullValues>,
-) -> Result<CoreReader<'a, R>> {
+    predicate: Option<Arc<dyn PhysicalIoExpr>>,
+    aggregate: Option<&'a [ScanAggregation]>,
+) -> Result<CoreReader<'a>> {
     // check if schema should be inferred
     let delimiter = delimiter.unwrap_or(b',');
 
-    #[cfg(feature = "decompress")]
-    let mut inferred_schema = false;
-
-    let schema = match schema {
+    let mut schema = match schema {
         Some(schema) => Cow::Borrowed(schema),
         None => {
             #[cfg(feature = "decompress")]
@@ -540,32 +517,25 @@ pub fn build_csv_reader<'a, R: MmapBytesReader>(
                 // We keep track of the inferred schema bool
                 // In case the file is compressed this schema inference is wrong and has to be done
                 // again after decompression.
-                inferred_schema = true;
-
-                const N: usize = 5;
-                let mut bytes = [0u8; N];
-                reader.read_exact(&mut bytes)?;
-                // restore position
-                reader.seek(SeekFrom::Current(-(N as i64)))?;
-                if decompress(&bytes).is_some() {
-                    Cow::Owned(Schema::default())
-                } else {
-                    let (inferred_schema, _) = infer_file_schema(
-                        &mut reader,
-                        delimiter,
-                        max_records,
-                        has_header,
-                        schema_overwrite,
-                        skip_rows,
-                        comment_char,
-                    )?;
-                    Cow::Owned(inferred_schema)
+                if let Some(b) = decompress(&reader_bytes) {
+                    reader_bytes = ReaderBytes::Owned(b);
                 }
+
+                let (inferred_schema, _) = infer_file_schema(
+                    &reader_bytes,
+                    delimiter,
+                    max_records,
+                    has_header,
+                    schema_overwrite,
+                    skip_rows,
+                    comment_char,
+                )?;
+                Cow::Owned(inferred_schema)
             }
             #[cfg(not(feature = "decompress"))]
             {
                 let (inferred_schema, _) = infer_file_schema(
-                    &mut reader,
+                    &reader_bytes,
                     delimiter,
                     max_records,
                     has_header,
@@ -577,6 +547,14 @@ pub fn build_csv_reader<'a, R: MmapBytesReader>(
             }
         }
     };
+    if let Some(dtypes) = dtype_overwrite {
+        let mut s = schema.into_owned();
+        let fields = s.fields_mut();
+        for (dt, field) in dtypes.iter().zip(fields) {
+            *field = Field::new(field.name(), dt.clone())
+        }
+        schema = Cow::Owned(s);
+    }
 
     let null_values = null_values.map(|nv| nv.process(&schema)).transpose()?;
 
@@ -590,16 +568,15 @@ pub fn build_csv_reader<'a, R: MmapBytesReader>(
     }
 
     Ok(CoreReader {
+        reader_bytes: Some(reader_bytes),
         schema,
         projection,
-        reader: Some(reader),
         line_number: if has_header { 1 } else { 0 },
         ignore_parser_errors,
         skip_rows,
         n_rows,
         encoding,
         n_threads,
-        path,
         has_header,
         delimiter,
         sample_size,
@@ -607,7 +584,7 @@ pub fn build_csv_reader<'a, R: MmapBytesReader>(
         low_memory,
         comment_char,
         null_values,
-        #[cfg(feature = "decompress")]
-        inferred_schema,
+        predicate,
+        aggregate,
     })
 }

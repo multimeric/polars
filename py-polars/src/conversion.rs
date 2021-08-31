@@ -1,12 +1,16 @@
+use crate::dataframe::PyDataFrame;
 use crate::error::PyPolarsEr;
 use crate::prelude::*;
 use crate::series::PySeries;
 use polars::chunked_array::object::PolarsObjectSafe;
 use polars::frame::row::Row;
+use polars::frame::NullStrategy;
 use polars::prelude::AnyValue;
+use polars::series::ops::diff::NullBehavior;
 use polars_core::utils::arrow::datatypes::ArrowNativeType;
 use pyo3::basic::CompareOp;
 use pyo3::conversion::{FromPyObject, IntoPy};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PySequence;
 use pyo3::{PyAny, PyResult};
@@ -30,10 +34,16 @@ impl<T> From<T> for Wrap<T> {
     }
 }
 
-fn get_pyseq(obj: &PyAny) -> PyResult<(&PySequence, usize)> {
+pub(crate) fn get_pyseq(obj: &PyAny) -> PyResult<(&PySequence, usize)> {
     let seq = <PySequence as PyTryFrom>::try_from(obj)?;
     let len = seq.len()? as usize;
     Ok((seq, len))
+}
+
+// extract a Rust DataFrame from a python DataFrame, that is DataFrame<PyDataFrame<RustDataFrame>>
+pub(crate) fn get_df(obj: &PyAny) -> PyResult<DataFrame> {
+    let pydf = obj.getattr("_df")?;
+    Ok(pydf.extract::<PyDataFrame>()?.df)
 }
 
 impl<'a, T> FromPyObject<'a> for Wrap<ChunkedArray<T>>
@@ -279,4 +289,46 @@ impl<'a, T: ArrowNativeType + FromPyObject<'a>> FromPyObject<'a> for Wrap<Aligne
         }
         Ok(Wrap(v))
     }
+}
+
+pub(crate) fn str_to_null_behavior(null_behavior: &str) -> PyResult<NullBehavior> {
+    let null_behavior = match null_behavior {
+        "drop" => NullBehavior::Drop,
+        "ignore" => NullBehavior::Ignore,
+        _ => {
+            return Err(PyValueError::new_err(
+                "use one of 'drop', 'ignore'".to_string(),
+            ))
+        }
+    };
+    Ok(null_behavior)
+}
+
+pub(crate) fn str_to_rankmethod(method: &str) -> PyResult<RankMethod> {
+    let method = match method {
+        "min" => RankMethod::Min,
+        "max" => RankMethod::Max,
+        "average" => RankMethod::Average,
+        "dense" => RankMethod::Dense,
+        "ordinal" => RankMethod::Ordinal,
+        _ => {
+            return Err(PyValueError::new_err(
+                "use one of 'avg, min, max, dense, ordinal'".to_string(),
+            ))
+        }
+    };
+    Ok(method)
+}
+
+pub(crate) fn str_to_null_strategy(strategy: &str) -> PyResult<NullStrategy> {
+    let strategy = match strategy {
+        "ignore" => NullStrategy::Ignore,
+        "propagate" => NullStrategy::Propagate,
+        _ => {
+            return Err(PyValueError::new_err(
+                "use one of 'ignore', 'propagate'".to_string(),
+            ))
+        }
+    };
+    Ok(strategy)
 }

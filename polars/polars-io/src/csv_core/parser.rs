@@ -202,17 +202,27 @@ impl<'a> Iterator for SplitLines<'a> {
         // denotes if we are in a string field, started with a quote
         let mut in_field = false;
         let mut pos = 0u32;
-        for &c in self.v {
-            pos += 1;
-            if c == b'"' {
-                // toggle between string field enclosure
-                //      if we encounter a starting '"' -> in_field = true;
-                //      if we encounter a closing '"' -> in_field = false;
-                in_field = !in_field;
-            }
-            // if we are not in a string and we encounter '\n' we can stop at this position.
-            if c == self.end_line_char && !in_field {
-                break;
+        let mut iter = self.v.iter();
+        loop {
+            match iter.next() {
+                Some(&c) => {
+                    pos += 1;
+                    if c == b'"' {
+                        // toggle between string field enclosure
+                        //      if we encounter a starting '"' -> in_field = true;
+                        //      if we encounter a closing '"' -> in_field = false;
+                        in_field = !in_field;
+                    }
+                    // if we are not in a string and we encounter '\n' we can stop at this position.
+                    if c == self.end_line_char && !in_field {
+                        break;
+                    }
+                }
+                None => {
+                    // no new line found we are done
+                    // the rest will be done by last line specific code.
+                    return None;
+                }
             }
         }
         // return line up to this position
@@ -403,7 +413,7 @@ pub(crate) fn parse_lines(
                 } else {
                     buf.add(field, ignore_parser_errors, read, encoding, needs_escaping)
                         .map_err(|e| {
-                            PolarsError::Other(
+                            PolarsError::ComputeError(
                                 format!(
                                     "{:?} on thread line {}; on input: {}",
                                     e,

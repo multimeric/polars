@@ -19,7 +19,7 @@ except ImportError:
 
 from ..datatypes import DataType, pytype_to_polars_type
 from ..utils import _process_null_values
-from .expr import UDF, Expr, _selection_to_pyexpr_list, col, expr_to_lit_or_expr, lit
+from .expr import Expr, _selection_to_pyexpr_list, col, expr_to_lit_or_expr, lit
 
 __all__ = [
     "LazyFrame",
@@ -189,6 +189,21 @@ class LazyFrame:
                 plt.imshow(img)
                 plt.show()
         return None
+
+    def inspect(self, fmt: str = "{}") -> "pl.LazyFrame":  # type: ignore
+        """
+        Prints the value that this node in the computation graph evaluates to and passes on the value.
+
+        >>> (df.select(col("foo").cumsum().alias("bar"))
+        >>>    .inspect()  # print the node before the filter
+        >>>    .filter(col("bar") == col("foo")))
+        """
+
+        def inspect(s: "pl.DataFrame") -> "pl.DataFrame":
+            print(fmt.format(s))  # type: ignore
+            return s
+
+        return self.map(inspect, predicate_pushdown=True, projection_pushdown=True)
 
     def sort(
         self,
@@ -377,7 +392,9 @@ class LazyFrame:
         return wrap_ldf(self._ldf.select(exprs))
 
     def groupby(
-        self, by: Union[str, tp.List[str], "Expr", tp.List["Expr"]]
+        self,
+        by: Union[str, tp.List[str], "Expr", tp.List["Expr"]],
+        maintain_order: bool = False,
     ) -> "LazyGroupBy":
         """
         Start a groupby operation.
@@ -386,6 +403,8 @@ class LazyFrame:
         ----------
         by
             Column(s) to group by.
+        maintain_order
+            Make sure that the order of the groups remain consistent. This is more expensive than a default groupby.
         """
         new_by: tp.List[PyExpr]
         if isinstance(by, list):
@@ -398,7 +417,7 @@ class LazyFrame:
             new_by = [col(by)._pyexpr]
         elif isinstance(by, Expr):
             new_by = [by._pyexpr]
-        lgb = self._ldf.groupby(new_by)
+        lgb = self._ldf.groupby(new_by, maintain_order)
         return LazyGroupBy(lgb)
 
     def join(
@@ -644,10 +663,37 @@ class LazyFrame:
         """
         return self.slice(0, 1)
 
-    def fill_none(self, fill_value: Union[int, str, "Expr"]) -> "LazyFrame":
+    def fill_null(self, fill_value: Union[int, str, "Expr"]) -> "LazyFrame":
+        """
+        Fill missing values
+
+        Parameters
+        ----------
+        fill_value
+            Value to fill the missing values with
+        """
         if not isinstance(fill_value, Expr):
             fill_value = lit(fill_value)
-        return wrap_ldf(self._ldf.fill_none(fill_value._pyexpr))
+        return wrap_ldf(self._ldf.fill_null(fill_value._pyexpr))
+
+    def fill_nan(self, fill_value: Union[int, str, "Expr"]) -> "LazyFrame":
+        """
+        Fill floating point NaN values.
+
+        ..warning::
+
+            NOTE that floating point NaN (No a Number) are not missing values!
+            to replace missing values, use `fill_null`.
+
+
+        Parameters
+        ----------
+        fill_value
+            Value to fill the NaN values with
+        """
+        if not isinstance(fill_value, Expr):
+            fill_value = lit(fill_value)
+        return wrap_ldf(self._ldf.fill_nan(fill_value._pyexpr))
 
     def std(self) -> "LazyFrame":
         """
@@ -805,13 +851,13 @@ class LazyFrame:
 
     def map(
         self,
-        f: Union["UDF", Callable[["pl.DataFrame"], "pl.DataFrame"]],
+        f: Callable[["pl.DataFrame"], "pl.DataFrame"],
         predicate_pushdown: bool = True,
         projection_pushdown: bool = True,
         no_optimizations: bool = False,
     ) -> "LazyFrame":
         """
-        Apply a custom UDF. It is important that the UDF returns a Polars DataFrame.
+        Apply a custom function. It is important that the function returns a Polars DataFrame.
 
         Parameters
         ----------
@@ -828,6 +874,12 @@ class LazyFrame:
             predicate_pushdown = False
             projection_pushdown = False
         return wrap_ldf(self._ldf.map(f, predicate_pushdown, projection_pushdown))
+
+    def interpolate(self) -> "LazyFrame":
+        """
+        Interpolate intermediate values. The interpolation method is linear.
+        """
+        return self.select(pl.col("*").interpolate())  # type: ignore
 
 
 class LazyGroupBy:

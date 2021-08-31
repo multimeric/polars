@@ -12,6 +12,13 @@ def create_series() -> pl.Series:
     return pl.Series("a", [1, 2])
 
 
+def test_cum_agg():
+    s = create_series()
+    assert s.cumsum() == [1, 2]
+    assert s.cummin() == [1, 1]
+    assert s.cummax() == [1, 2]
+
+
 def test_init_inputs():
     # Good inputs
     pl.Series("a", [1, 2])
@@ -19,10 +26,14 @@ def test_init_inputs():
     pl.Series(name="a", values=[1, 2])
     pl.Series(values=[1, 2], name="a")
 
-    pl.Series([1, 2])
-    pl.Series(values=[1, 2])
-    pl.Series()
-    pl.Series("a")
+    assert pl.Series([1, 2]).dtype == pl.Int64
+    assert pl.Series(values=[1, 2]).dtype == pl.Int64
+    assert pl.Series("a").dtype == pl.Float32  # f32 type used in case of no data
+    assert pl.Series().dtype == pl.Float32
+    assert pl.Series(values=[True, False]).dtype == pl.Boolean
+    assert pl.Series(values=np.array([True, False])).dtype == pl.Boolean
+    assert pl.Series(values=np.array(["foo", "bar"])).dtype == pl.Utf8
+    assert pl.Series(values=["foo", "bar"]).dtype == pl.Utf8
 
     # Bad inputs
     with pytest.raises(ValueError):
@@ -87,6 +98,17 @@ def test_arithmetic():
     # integer division
     assert ((1 / a) == [1.0, 0.5]).sum() == 2
     assert ((1 // a) == [1, 0]).sum() == 2
+    # modulo
+    assert ((1 % a) == [0, 1]).sum() == 2
+    assert ((a % 1) == [0, 0]).sum() == 2
+    # negate
+    assert (-a == [-1, -2]).sum() == 2
+    # wrong dtypes in rhs operands
+    assert ((1.0 - a) == [0, -1]).sum() == 2
+    assert ((1.0 / a) == [1.0, 0.5]).sum() == 2
+    assert ((1.0 * a) == [1, 2]).sum() == 2
+    assert ((1.0 + a) == [2, 3]).sum() == 2
+    assert ((1.0 % a) == [0, 1]).sum() == 2
 
 
 def test_various():
@@ -213,9 +235,9 @@ def test_set():
     a[mask] = False
 
 
-def test_fill_none():
+def test_fill_null():
     a = pl.Series("a", [1, 2, None], nullable=True)
-    b = a.fill_none("forward")
+    b = a.fill_null("forward")
     assert b == [1, 2, 2]
 
 
@@ -246,17 +268,6 @@ def test_shift():
     assert a.shift(1) == [None, 1, 2]
     assert a.shift(-1) == [1, 2, None]
     assert a.shift(-2) == [1, None, None]
-
-
-@pytest.mark.parametrize(
-    "dtype, fmt, null_values", [(Date32, "%d-%m-%Y", 0), (Date32, "%Y-%m-%d", 3)]
-)
-def test_parse_date(dtype, fmt, null_values):
-    dates = ["25-08-1988", "20-01-1993", "25-09-2020"]
-    result = pl.Series.parse_date("dates", dates, dtype, fmt)
-    # Why results Date64 into `nan`?
-    assert result.dtype == dtype
-    assert result.is_null().sum() == null_values
 
 
 def test_rolling():
@@ -472,3 +483,22 @@ def test_jsonpath_single():
         "2.1",
         "true",
     ]
+
+
+def test_rank_dispatch():
+    s = pl.Series("a", [1, 2, 3, 2, 2, 3, 0])
+
+    assert list(s.rank("dense")) == [2, 3, 4, 3, 3, 4, 1]
+
+    df = pl.DataFrame([s])
+    df.select(pl.col("a").rank("dense"))["a"] == [2, 3, 4, 3, 3, 4, 1]
+
+
+def test_diff_dispatch():
+    s = pl.Series("a", [1, 2, 3, 2, 2, 3, 0])
+    expected = [1, 1, -1, 0, 1, -3]
+
+    assert list(s.diff(null_behavior="drop")) == expected
+
+    df = pl.DataFrame([s])
+    assert df.select(pl.col("a").diff())["a"].to_list() == [None, 1, 1, -1, 0, 1, -3]

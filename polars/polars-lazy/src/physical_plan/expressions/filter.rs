@@ -3,7 +3,6 @@ use crate::prelude::*;
 use polars_core::frame::groupby::GroupTuples;
 use polars_core::{prelude::*, POOL};
 use rayon::prelude::*;
-use std::borrow::Cow;
 use std::sync::Arc;
 
 pub struct FilterExpr {
@@ -34,9 +33,11 @@ impl PhysicalExpr for FilterExpr {
         df: &DataFrame,
         groups: &'a GroupTuples,
         state: &ExecutionState,
-    ) -> Result<(Series, Cow<'a, GroupTuples>)> {
-        let s = self.input.evaluate(df, state)?;
-        let predicate_s = self.by.evaluate(df, state)?;
+    ) -> Result<AggregationContext<'a>> {
+        let mut ac_s = self.input.evaluate_on_groups(df, groups, state)?;
+        let ac_predicate = self.by.evaluate_on_groups(df, groups, state)?;
+        let groups = ac_s.groups();
+        let predicate_s = ac_predicate.flat();
         let predicate = predicate_s.bool()?;
 
         let groups = POOL.install(|| {
@@ -56,7 +57,8 @@ impl PhysicalExpr for FilterExpr {
                 .collect()
         });
 
-        Ok((s, Cow::Owned(groups)))
+        ac_s.with_groups(groups).set_original_len(false);
+        Ok(ac_s)
     }
 
     fn to_field(&self, input_schema: &Schema) -> Result<Field> {

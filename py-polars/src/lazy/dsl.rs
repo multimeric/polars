@@ -1,4 +1,6 @@
+use crate::conversion::str_to_null_behavior;
 use crate::lazy::utils::py_exprs_to_exprs;
+use crate::prelude::str_to_rankmethod;
 use crate::series::PySeries;
 use crate::utils::{reinterpret, str_to_polarstype};
 use polars::lazy::dsl;
@@ -7,6 +9,29 @@ use polars::prelude::*;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyFloat, PyInt, PyString};
 use pyo3::{class::basic::CompareOp, PyNumberProtocol, PyObjectProtocol};
+
+fn call_lambda_with_series(
+    py: Python,
+    s: Series,
+    lambda: &PyObject,
+    polars_module: &PyObject,
+) -> PyObject {
+    let pypolars = polars_module.cast_as::<PyModule>(py).unwrap();
+
+    // create a PySeries struct/object for Python
+    let pyseries = PySeries::new(s);
+    // Wrap this PySeries object in the python side Series wrapper
+    let python_series_wrapper = pypolars
+        .getattr("wrap_s")
+        .unwrap()
+        .call1((pyseries,))
+        .unwrap();
+    // call the lambda and get a python side Series wrapper
+    match lambda.call1(py, (python_series_wrapper,)) {
+        Ok(pyobj) => pyobj,
+        Err(e) => panic!("python apply failed: {}", e.pvalue(py).to_string()),
+    }
+}
 
 #[pyclass]
 #[repr(transparent)]
@@ -28,6 +53,9 @@ impl PyNumberProtocol for PyExpr {
     }
     fn __truediv__(lhs: Self, rhs: Self) -> PyResult<PyExpr> {
         Ok(dsl::binary_expr(lhs.inner, Operator::Divide, rhs.inner).into())
+    }
+    fn __mod__(lhs: Self, rhs: Self) -> PyResult<PyExpr> {
+        Ok(dsl::binary_expr(lhs.inner, Operator::Modulus, rhs.inner).into())
     }
 }
 
@@ -176,8 +204,8 @@ impl PyExpr {
             .into()
     }
 
-    pub fn fill_none(&self, expr: PyExpr) -> PyExpr {
-        self.clone().inner.fill_none(expr.inner).into()
+    pub fn fill_null(&self, expr: PyExpr) -> PyExpr {
+        self.clone().inner.fill_null(expr.inner).into()
     }
 
     pub fn filter(&self, predicate: PyExpr) -> PyExpr {
@@ -207,7 +235,7 @@ impl PyExpr {
     pub fn take_every(&self, n: usize) -> PyExpr {
         self.clone()
             .inner
-            .map(move |s: Series| Ok(s.take_every(n)), None)
+            .map(move |s: Series| Ok(s.take_every(n)), GetOutput::same_type())
             .into()
     }
     pub fn tail(&self, n: Option<usize>) -> PyExpr {
@@ -255,14 +283,14 @@ impl PyExpr {
         self.clone().inner.pow(exponent).into()
     }
 
-    pub fn cum_sum(&self, reverse: bool) -> PyExpr {
-        self.clone().inner.cum_sum(reverse).into()
+    pub fn cumsum(&self, reverse: bool) -> PyExpr {
+        self.clone().inner.cumsum(reverse).into()
     }
-    pub fn cum_max(&self, reverse: bool) -> PyExpr {
-        self.clone().inner.cum_max(reverse).into()
+    pub fn cummax(&self, reverse: bool) -> PyExpr {
+        self.clone().inner.cummax(reverse).into()
     }
-    pub fn cum_min(&self, reverse: bool) -> PyExpr {
-        self.clone().inner.cum_min(reverse).into()
+    pub fn cummin(&self, reverse: bool) -> PyExpr {
+        self.clone().inner.cummin(reverse).into()
     }
 
     pub fn str_parse_date32(&self, fmt: Option<String>) -> PyExpr {
@@ -272,7 +300,7 @@ impl PyExpr {
         };
         self.clone()
             .inner
-            .map(function, Some(DataType::Date32))
+            .map(function, GetOutput::from_type(DataType::Date32))
             .into()
     }
 
@@ -283,7 +311,7 @@ impl PyExpr {
         };
         self.clone()
             .inner
-            .map(function, Some(DataType::Date64))
+            .map(function, GetOutput::from_type(DataType::Date64))
             .into()
     }
 
@@ -294,7 +322,7 @@ impl PyExpr {
         };
         self.clone()
             .inner
-            .map(function, Some(DataType::UInt32))
+            .map(function, GetOutput::from_type(DataType::UInt32))
             .into()
     }
 
@@ -305,7 +333,7 @@ impl PyExpr {
         };
         self.clone()
             .inner
-            .map(function, Some(DataType::Utf8))
+            .map(function, GetOutput::from_type(DataType::Utf8))
             .into()
     }
 
@@ -316,7 +344,7 @@ impl PyExpr {
         };
         self.clone()
             .inner
-            .map(function, Some(DataType::UInt32))
+            .map(function, GetOutput::from_type(DataType::UInt32))
             .into()
     }
 
@@ -327,7 +355,7 @@ impl PyExpr {
         };
         self.clone()
             .inner
-            .map(function, Some(DataType::UInt32))
+            .map(function, GetOutput::from_type(DataType::UInt32))
             .into()
     }
 
@@ -336,10 +364,13 @@ impl PyExpr {
             let ca = s.utf8()?;
             match ca.replace(&pat, &val) {
                 Ok(ca) => Ok(ca.into_series()),
-                Err(e) => Err(PolarsError::Other(format!("{:?}", e).into())),
+                Err(e) => Err(PolarsError::ComputeError(format!("{:?}", e).into())),
             }
         };
-        self.clone().inner.map(function, None).into()
+        self.clone()
+            .inner
+            .map(function, GetOutput::same_type())
+            .into()
     }
 
     pub fn str_replace_all(&self, pat: String, val: String) -> PyExpr {
@@ -347,10 +378,13 @@ impl PyExpr {
             let ca = s.utf8()?;
             match ca.replace_all(&pat, &val) {
                 Ok(ca) => Ok(ca.into_series()),
-                Err(e) => Err(PolarsError::Other(format!("{:?}", e).into())),
+                Err(e) => Err(PolarsError::ComputeError(format!("{:?}", e).into())),
             }
         };
-        self.clone().inner.map(function, None).into()
+        self.clone()
+            .inner
+            .map(function, GetOutput::same_type())
+            .into()
     }
 
     pub fn str_contains(&self, pat: String) -> PyExpr {
@@ -358,12 +392,12 @@ impl PyExpr {
             let ca = s.utf8()?;
             match ca.contains(&pat) {
                 Ok(ca) => Ok(ca.into_series()),
-                Err(e) => Err(PolarsError::Other(format!("{:?}", e).into())),
+                Err(e) => Err(PolarsError::ComputeError(format!("{:?}", e).into())),
             }
         };
         self.clone()
             .inner
-            .map(function, Some(DataType::Boolean))
+            .map(function, GetOutput::from_type(DataType::Boolean))
             .into()
     }
 
@@ -372,12 +406,12 @@ impl PyExpr {
             let ca = s.utf8()?;
             match ca.json_path_match(&pat) {
                 Ok(ca) => Ok(ca.into_series()),
-                Err(e) => Err(PolarsError::Other(format!("{:?}", e).into())),
+                Err(e) => Err(PolarsError::ComputeError(format!("{:?}", e).into())),
             }
         };
         self.clone()
             .inner
-            .map(function, Some(DataType::Boolean))
+            .map(function, GetOutput::from_type(DataType::Boolean))
             .into()
     }
 
@@ -385,7 +419,7 @@ impl PyExpr {
         let function = move |s: Series| s.strftime(&fmt);
         self.clone()
             .inner
-            .map(function, Some(DataType::Utf8))
+            .map(function, GetOutput::from_type(DataType::Utf8))
             .into()
     }
 
@@ -394,6 +428,12 @@ impl PyExpr {
     }
     pub fn month(&self) -> PyExpr {
         self.clone().inner.month().into()
+    }
+    pub fn week(&self) -> PyExpr {
+        self.clone().inner.week().into()
+    }
+    pub fn weekday(&self) -> PyExpr {
+        self.clone().inner.weekday().into()
     }
     pub fn day(&self) -> PyExpr {
         self.clone().inner.day().into()
@@ -413,8 +453,136 @@ impl PyExpr {
     pub fn nanosecond(&self) -> PyExpr {
         self.clone().inner.nanosecond().into()
     }
+    pub fn timestamp(&self) -> PyExpr {
+        self.clone()
+            .inner
+            .map(
+                |s| s.timestamp().map(|ca| ca.into_series()),
+                GetOutput::from_type(DataType::Int64),
+            )
+            .into()
+    }
 
-    pub fn map(&self, lambda: PyObject, output_type: &PyAny) -> PyExpr {
+    pub fn rolling_apply(&self, py: Python, window_size: usize, lambda: PyObject) -> PyExpr {
+        // get the pypolars module
+        // do the import outside of the function.
+        let pypolars = PyModule::import(py, "polars").unwrap().to_object(py);
+
+        let function = move |s: &Series| {
+            let gil = Python::acquire_gil();
+            let py = gil.python();
+
+            let out = call_lambda_with_series(py, s.clone(), &lambda, &pypolars);
+            match out.getattr(py, "_s") {
+                Ok(pyseries) => {
+                    let pyseries = pyseries.extract::<PySeries>(py).unwrap();
+                    pyseries.series
+                }
+                Err(_) => {
+                    let obj = out;
+                    let is_float = obj.as_ref(py).is_instance::<PyFloat>().unwrap();
+
+                    let dtype = s.dtype();
+
+                    use DataType::*;
+                    let result = match dtype {
+                        UInt8 => {
+                            if is_float {
+                                let v = obj.extract::<f64>(py).unwrap();
+                                Ok(UInt8Chunked::new_from_slice("", &[v as u8]).into_series())
+                            } else {
+                                obj.extract::<u8>(py)
+                                    .map(|v| UInt8Chunked::new_from_slice("", &[v]).into_series())
+                            }
+                        }
+                        UInt16 => {
+                            if is_float {
+                                let v = obj.extract::<f64>(py).unwrap();
+                                Ok(UInt16Chunked::new_from_slice("", &[v as u16]).into_series())
+                            } else {
+                                obj.extract::<u16>(py)
+                                    .map(|v| UInt16Chunked::new_from_slice("", &[v]).into_series())
+                            }
+                        }
+                        UInt32 => {
+                            if is_float {
+                                let v = obj.extract::<f64>(py).unwrap();
+                                Ok(UInt32Chunked::new_from_slice("", &[v as u32]).into_series())
+                            } else {
+                                obj.extract::<u32>(py)
+                                    .map(|v| UInt32Chunked::new_from_slice("", &[v]).into_series())
+                            }
+                        }
+                        UInt64 => {
+                            if is_float {
+                                let v = obj.extract::<f64>(py).unwrap();
+                                Ok(UInt64Chunked::new_from_slice("", &[v as u64]).into_series())
+                            } else {
+                                obj.extract::<u64>(py)
+                                    .map(|v| UInt64Chunked::new_from_slice("", &[v]).into_series())
+                            }
+                        }
+                        Int8 => {
+                            if is_float {
+                                let v = obj.extract::<f64>(py).unwrap();
+                                Ok(Int8Chunked::new_from_slice("", &[v as i8]).into_series())
+                            } else {
+                                obj.extract::<i8>(py)
+                                    .map(|v| Int8Chunked::new_from_slice("", &[v]).into_series())
+                            }
+                        }
+                        Int16 => {
+                            if is_float {
+                                let v = obj.extract::<f64>(py).unwrap();
+                                Ok(Int16Chunked::new_from_slice("", &[v as i16]).into_series())
+                            } else {
+                                obj.extract::<i16>(py)
+                                    .map(|v| Int16Chunked::new_from_slice("", &[v]).into_series())
+                            }
+                        }
+                        Int32 => {
+                            if is_float {
+                                let v = obj.extract::<f64>(py).unwrap();
+                                Ok(Int32Chunked::new_from_slice("", &[v as i32]).into_series())
+                            } else {
+                                obj.extract::<i32>(py)
+                                    .map(|v| Int32Chunked::new_from_slice("", &[v]).into_series())
+                            }
+                        }
+                        Int64 => {
+                            if is_float {
+                                let v = obj.extract::<f64>(py).unwrap();
+                                Ok(Int64Chunked::new_from_slice("", &[v as i64]).into_series())
+                            } else {
+                                obj.extract::<i64>(py)
+                                    .map(|v| Int64Chunked::new_from_slice("", &[v]).into_series())
+                            }
+                        }
+                        Float32 => obj
+                            .extract::<f32>(py)
+                            .map(|v| Float32Chunked::new_from_slice("", &[v]).into_series()),
+                        Float64 => obj
+                            .extract::<f64>(py)
+                            .map(|v| Float64Chunked::new_from_slice("", &[v]).into_series()),
+                        dt => panic!("{:?} not implemented", dt),
+                    };
+
+                    match result {
+                        Ok(s) => s,
+                        Err(e) => {
+                            panic!("{:?}", e)
+                        }
+                    }
+                }
+            }
+        };
+        self.clone()
+            .inner
+            .rolling_apply(window_size, Arc::new(function))
+            .into()
+    }
+
+    pub fn map(&self, py: Python, lambda: PyObject, output_type: &PyAny, agg_list: bool) -> PyExpr {
         let output_type = match output_type.is_none() {
             true => None,
             false => {
@@ -422,27 +590,18 @@ impl PyExpr {
                 Some(str_to_polarstype(str_repr))
             }
         };
+        // get the pypolars module
+        // do the import outside of the function to prevent import side effects in a hot loop.
+        let pypolars = PyModule::import(py, "polars").unwrap().to_object(py);
 
         let function = move |s: Series| {
             let gil = Python::acquire_gil();
             let py = gil.python();
-            // get the pypolars module
-            let pypolars = PyModule::import(py, "polars").unwrap();
-            // create a PySeries struct/object for Python
-            let pyseries = PySeries::new(s);
-            // Wrap this PySeries object in the python side Series wrapper
-            let python_series_wrapper = pypolars
-                .getattr("wrap_s")
-                .unwrap()
-                .call1((pyseries,))
-                .unwrap();
-            // call the lambda and get a python side Series wrapper
-            let result_series_wrapper = match lambda.call1(py, (python_series_wrapper,)) {
-                Ok(pyobj) => pyobj,
-                Err(e) => panic!("UDF failed: {}", e.pvalue(py).to_string()),
-            };
+
+            // this is a python Series
+            let out = call_lambda_with_series(py, s, &lambda, &pypolars);
             // unpack the wrapper in a PySeries
-            let py_pyseries = result_series_wrapper.getattr(py, "_s").expect(
+            let py_pyseries = out.getattr(py, "_s").expect(
                 "Could net get series attribute '_s'. Make sure that you return a Series object.",
             );
             // Downcast to Rust
@@ -451,7 +610,29 @@ impl PyExpr {
             Ok(pyseries.series)
         };
 
-        self.clone().inner.map(function, output_type).into()
+        if agg_list {
+            self.clone()
+                .inner
+                .map_list(
+                    function,
+                    GetOutput::map_field(move |fld| match output_type {
+                        Some(ref dt) => Field::new(fld.name(), dt.clone()),
+                        None => fld.clone(),
+                    }),
+                )
+                .into()
+        } else {
+            self.clone()
+                .inner
+                .map(
+                    function,
+                    GetOutput::map_field(move |fld| match output_type {
+                        Some(ref dt) => Field::new(fld.name(), dt.clone()),
+                        None => fld.clone(),
+                    }),
+                )
+                .into()
+        }
     }
 
     pub fn dot(&self, other: PyExpr) -> PyExpr {
@@ -464,7 +645,7 @@ impl PyExpr {
         };
         self.clone()
             .inner
-            .map(function, Some(DataType::UInt64))
+            .map(function, GetOutput::from_type(DataType::UInt64))
             .into()
     }
 
@@ -475,7 +656,10 @@ impl PyExpr {
         } else {
             DataType::UInt64
         };
-        self.clone().inner.map(function, Some(dt)).into()
+        self.clone()
+            .inner
+            .map(function, GetOutput::from_type(dt))
+            .into()
     }
     pub fn mode(&self) -> PyExpr {
         self.inner.clone().mode().into()
@@ -483,8 +667,167 @@ impl PyExpr {
     pub fn keep_name(&self) -> PyExpr {
         self.inner.clone().keep_name().into()
     }
+    pub fn prefix(&self, prefix: &str) -> PyExpr {
+        self.inner.clone().prefix(prefix).into()
+    }
+    pub fn suffix(&self, suffix: &str) -> PyExpr {
+        self.inner.clone().suffix(suffix).into()
+    }
     pub fn exclude(&self, columns: Vec<String>) -> PyExpr {
         self.inner.clone().exclude(&columns).into()
+    }
+    pub fn interpolate(&self) -> PyExpr {
+        self.inner.clone().interpolate().into()
+    }
+
+    pub fn rolling_sum(
+        &self,
+        window_size: u32,
+        weight: Option<Vec<f64>>,
+        ignore_null: bool,
+        min_periods: u32,
+    ) -> PyExpr {
+        self.inner
+            .clone()
+            .rolling_sum(window_size, weight.as_deref(), ignore_null, min_periods)
+            .into()
+    }
+    pub fn rolling_min(
+        &self,
+        window_size: u32,
+        weight: Option<Vec<f64>>,
+        ignore_null: bool,
+        min_periods: u32,
+    ) -> Self {
+        self.inner
+            .clone()
+            .rolling_min(window_size, weight.as_deref(), ignore_null, min_periods)
+            .into()
+    }
+    pub fn rolling_max(
+        &self,
+        window_size: u32,
+        weight: Option<Vec<f64>>,
+        ignore_null: bool,
+        min_periods: u32,
+    ) -> Self {
+        self.inner
+            .clone()
+            .rolling_max(window_size, weight.as_deref(), ignore_null, min_periods)
+            .into()
+    }
+    pub fn rolling_mean(
+        &self,
+        window_size: u32,
+        weight: Option<Vec<f64>>,
+        ignore_null: bool,
+        min_periods: u32,
+    ) -> Self {
+        self.inner
+            .clone()
+            .rolling_mean(window_size, weight.as_deref(), ignore_null, min_periods)
+            .into()
+    }
+
+    fn lst_max(&self) -> Self {
+        self.inner
+            .clone()
+            .map(
+                |s| Ok(s.list()?.lst_max()),
+                GetOutput::map_field(|f| {
+                    if let DataType::List(adt) = f.data_type() {
+                        Field::new(f.name(), adt.into())
+                    } else {
+                        // inner type
+                        f.clone()
+                    }
+                }),
+            )
+            .into()
+    }
+
+    fn lst_min(&self) -> Self {
+        self.inner
+            .clone()
+            .map(
+                |s| Ok(s.list()?.lst_min()),
+                GetOutput::map_field(|f| {
+                    if let DataType::List(adt) = f.data_type() {
+                        Field::new(f.name(), adt.into())
+                    } else {
+                        // inner type
+                        f.clone()
+                    }
+                }),
+            )
+            .into()
+    }
+
+    fn lst_sum(&self) -> Self {
+        self.inner
+            .clone()
+            .map(
+                |s| Ok(s.list()?.lst_sum()),
+                GetOutput::map_field(|f| {
+                    if let DataType::List(adt) = f.data_type() {
+                        Field::new(f.name(), adt.into())
+                    } else {
+                        // inner type
+                        f.clone()
+                    }
+                }),
+            )
+            .into()
+    }
+
+    fn lst_mean(&self) -> Self {
+        self.inner
+            .clone()
+            .map(
+                |s| Ok(s.list()?.lst_mean().into_series()),
+                GetOutput::from_type(DataType::Float64),
+            )
+            .into()
+    }
+
+    fn lst_sort(&self, reverse: bool) -> Self {
+        self.inner
+            .clone()
+            .map(
+                move |s| Ok(s.list()?.lst_sort(reverse).into_series()),
+                GetOutput::same_type(),
+            )
+            .into()
+    }
+
+    fn lst_reverse(&self) -> Self {
+        self.inner
+            .clone()
+            .map(
+                move |s| Ok(s.list()?.lst_reverse().into_series()),
+                GetOutput::same_type(),
+            )
+            .into()
+    }
+
+    fn lst_unique(&self) -> Self {
+        self.inner
+            .clone()
+            .map(
+                move |s| Ok(s.list()?.lst_unique()?.into_series()),
+                GetOutput::same_type(),
+            )
+            .into()
+    }
+
+    fn rank(&self, method: &str) -> Self {
+        let method = str_to_rankmethod(method).unwrap();
+        self.inner.clone().rank(method).into()
+    }
+
+    fn diff(&self, n: usize, null_behavior: &str) -> Self {
+        let null_behavior = str_to_null_behavior(null_behavior).unwrap();
+        self.inner.clone().diff(n, null_behavior).into()
     }
 }
 
@@ -565,6 +908,10 @@ pub fn when(predicate: PyExpr) -> When {
 
 pub fn col(name: &str) -> PyExpr {
     dsl::col(name).into()
+}
+
+pub fn cols(names: Vec<String>) -> PyExpr {
+    dsl::cols(names).into()
 }
 
 pub fn binary_expr(l: PyExpr, op: u8, r: PyExpr) -> PyExpr {
@@ -665,7 +1012,12 @@ pub fn lit(value: &PyAny) -> PyExpr {
         dsl::lit(val).into()
     } else if let Ok(int) = value.downcast::<PyInt>() {
         let val = int.extract::<i64>().unwrap();
-        dsl::lit(val).into()
+
+        if val > 0 && val < i32::MAX as i64 || val < 0 && val > i32::MIN as i64 {
+            dsl::lit(val as i32).into()
+        } else {
+            dsl::lit(val).into()
+        }
     } else if let Ok(float) = value.downcast::<PyFloat>() {
         let val = float.extract::<f64>().unwrap();
         dsl::lit(val).into()

@@ -1,5 +1,7 @@
+import copy
 import gzip
 import io
+import pickle
 import zlib
 
 import numpy as np
@@ -112,6 +114,30 @@ a,n/a,c"""
     assert df[1, "b"] is None
 
 
+def test_partial_dtype_overwrite():
+    csv = """
+a,b,c
+1,2,3
+1,2,3
+"""
+    f = io.StringIO(csv)
+    df = pl.read_csv(f, dtype=[pl.Utf8])
+    assert df.dtypes == [pl.Utf8, pl.Int64, pl.Int64]
+
+
+def test_partial_column_rename():
+    csv = """
+a,b,c
+1,2,3
+1,2,3
+"""
+    f = io.StringIO(csv)
+    for use in [True, False]:
+        f.seek(0)
+        df = pl.read_csv(f, new_columns=["foo"], use_pyarrow=use)
+        assert df.columns == ["foo", "b", "c"]
+
+
 def test_compressed_csv():
     # gzip compression
     csv = """
@@ -130,8 +156,14 @@ a,b,c
         {"a": [1, 2, 3], "b": ["a", "b", "c"], "c": [1.0, 2.0, 3.0]}
     )
     assert out.frame_equal(expected)
+
     # now from disk
     out = pl.read_csv("tests/files/gzipped.csv")
+    assert out.frame_equal(expected)
+
+    # now with column projection
+    out = pl.read_csv(bytes, columns=["a", "b"])
+    expected = pl.DataFrame({"a": [1, 2, 3], "b": ["a", "b", "c"]})
     assert out.frame_equal(expected)
 
     # zlib compression
@@ -153,3 +185,24 @@ def test_empty_bytes():
     b = b""
     with pytest.raises(ValueError):
         pl.read_csv(b)
+
+
+def test_pickle():
+    a = pl.Series("a", [1, 2])
+    b = pickle.dumps(a)
+    out = pickle.loads(b)
+    assert a.series_equal(out)
+    df = pl.DataFrame({"a": [1, 2], "b": ["a", None], "c": [True, False]})
+    b = pickle.dumps(df)
+    out = pickle.loads(b)
+    assert df.frame_equal(out, null_equal=True)
+
+
+def test_copy():
+    df = pl.DataFrame({"a": [1, 2], "b": ["a", None], "c": [True, False]})
+    copy.copy(df).frame_equal(df, True)
+    copy.deepcopy(df).frame_equal(df, True)
+
+    a = pl.Series("a", [1, 2])
+    copy.copy(a).series_equal(a, True)
+    copy.deepcopy(a).series_equal(a, True)

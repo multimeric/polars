@@ -14,6 +14,16 @@ fn scan_foods_csv() -> LazyFrame {
     LazyCsvReader::new(path.to_string()).finish()
 }
 
+fn fruits_cars() -> DataFrame {
+    df!(
+            "A"=> [1, 2, 3, 4, 5],
+            "fruits"=> ["banana", "banana", "apple", "apple", "banana"],
+            "B"=> [5, 4, 3, 2, 1],
+            "cars"=> ["beetle", "audi", "beetle", "beetle", "beetle"]
+    )
+    .unwrap()
+}
+
 #[test]
 fn test_lazy_ternary() {
     let df = get_df()
@@ -120,7 +130,7 @@ fn test_lazy_udf() {
     let df = get_df();
     let new = df
         .lazy()
-        .select(&[col("sepal.width").map(|s| Ok(s * 200.0), None)])
+        .select(&[col("sepal.width").map(|s| Ok(s * 200.0), GetOutput::same_type())])
         .collect()
         .unwrap();
     assert_eq!(
@@ -294,7 +304,11 @@ fn test_lazy_query_2() {
     let df = load_df();
     let ldf = df
         .lazy()
-        .with_column(col("a").map(|s| Ok(s * 2), None).alias("foo"))
+        .with_column(
+            col("a")
+                .map(|s| Ok(s * 2), GetOutput::same_type())
+                .alias("foo"),
+        )
         .filter(col("a").lt(lit(2)))
         .select(&[col("b"), col("a")]);
 
@@ -329,19 +343,7 @@ fn test_lazy_query_4() {
         .agg(vec![
             col("day").list().alias("day"),
             col("cumcases")
-                .map(
-                    |s: Series| {
-                        // determine the diff per column
-                        let a: ListChunked = s
-                            .list()
-                            .unwrap()
-                            .into_iter()
-                            .map(|opt_s| opt_s.map(|s| &s - &(s.shift(1))))
-                            .collect();
-                        Ok(a.into_series())
-                    },
-                    None,
-                )
+                .apply(|s: Series| Ok(&s - &(s.shift(1))), GetOutput::same_type())
                 .alias("diff_cases"),
         ])
         .explode(vec![col("day"), col("diff_cases")])
@@ -524,12 +526,12 @@ fn test_lazy_shift_and_fill_all() {
     let df = DataFrame::new(vec![Series::new("data", data)]).unwrap();
     let out = df
         .lazy()
-        .with_column(col("data").shift(1).fill_none(lit(0)).alias("output"))
+        .with_column(col("data").shift(1).fill_null(lit(0)).alias("output"))
         .collect()
         .unwrap();
     assert_eq!(
         Vec::from(out.column("output").unwrap().i32().unwrap()),
-        vec![Some(0), Some(2), Some(3)]
+        vec![Some(0), Some(1), Some(2)]
     );
 }
 
@@ -606,7 +608,7 @@ fn test_lazy_filter_and_rename() {
         .with_column_renamed("a", "x")
         .filter(col("x").map(
             |s: Series| Ok(s.gt(3).into_series()),
-            Some(DataType::Boolean),
+            GetOutput::from_type(DataType::Boolean),
         ))
         .select(&[col("x")]);
 
@@ -619,7 +621,7 @@ fn test_lazy_filter_and_rename() {
     // now we check if the column is rename or added when we don't select
     let lf = df.lazy().with_column_renamed("a", "x").filter(col("x").map(
         |s: Series| Ok(s.gt(3).into_series()),
-        Some(DataType::Boolean),
+        GetOutput::from_type(DataType::Boolean),
     ));
 
     assert_eq!(lf.collect().unwrap().get_column_names(), &["x", "b", "c"]);
@@ -681,13 +683,13 @@ fn test_lazy_update_column() {
 }
 
 #[test]
-fn test_lazy_fill_none() {
+fn test_lazy_fill_null() {
     let df = df! {
         "a" => &[None, Some(2)],
         "b" => &[Some(1), None]
     }
     .unwrap();
-    let out = df.lazy().fill_none(lit(10.0)).collect().unwrap();
+    let out = df.lazy().fill_null(lit(10.0)).collect().unwrap();
     let correct = df! {
         "a" => &[Some(10.0), Some(2.0)],
         "b" => &[Some(1.0), Some(10.0)]
@@ -770,7 +772,8 @@ fn test_type_coercion() {
     if let LogicalPlan::Projection { expr, .. } = lp {
         if let Expr::BinaryExpr { left, right, .. } = &expr[0] {
             assert!(matches!(&**left, Expr::Cast { .. }));
-            assert!(matches!(&**right, Expr::Cast { .. }));
+            // bar is already float, does not have to be coerced
+            assert!(matches!(&**right, Expr::Column { .. }));
         } else {
             panic!()
         }
@@ -825,26 +828,13 @@ fn test_lazy_partition_agg() {
 
 #[test]
 fn test_lazy_groupby_apply() {
-    let df = df! {
-        "A" => &[1, 2, 3, 4, 5],
-        "fruits" => &["banana", "banana", "apple", "apple", "banana"],
-        "B" => &[5, 4, 3, 2, 1],
-        "cars" => &["beetle", "audi", "beetle", "beetle", "beetle"]
-    }
-    .unwrap();
+    let df = fruits_cars();
 
     df.lazy()
         .groupby(vec![col("fruits")])
-        .agg(vec![col("cars").map(
-            |s: Series| {
-                let ca: UInt32Chunked = s
-                    .list()?
-                    .into_iter()
-                    .map(|opt_s| opt_s.map(|s| s.len() as u32))
-                    .collect();
-                Ok(ca.into_series())
-            },
-            None,
+        .agg(vec![col("cars").apply(
+            |s: Series| Ok(Series::new("", &[s.len() as u32])),
+            GetOutput::same_type(),
         )])
         .collect()
         .unwrap();
@@ -1131,9 +1121,11 @@ fn test_groupby_cumsum() -> Result<()> {
     let out = df
         .lazy()
         .groupby(vec![col("groups")])
-        .agg(vec![col("vals").cum_sum(false)])
+        .agg(vec![col("vals").cumsum(false)])
         .sort("groups", false)
         .collect()?;
+
+    dbg!(&out);
 
     assert_eq!(
         Vec::from(out.column("vals")?.explode()?.i32()?),
@@ -1321,7 +1313,7 @@ fn test_fold_wildcard() -> Result<()> {
     );
 
     // test if we don't panic due to wildcard
-    let out = df1
+    let _out = df1
         .lazy()
         .select(vec![all_exprs(vec![col("*").is_not_null()])])
         .collect()?;
@@ -1422,10 +1414,366 @@ fn test_filter_in_groupby_agg() -> Result<()> {
         .groupby(vec![col("a")])
         .agg(vec![(col("b")
             .filter(col("b").eq(lit(100)))
-            .map(|s| Ok(s), None))
+            .map(|s| Ok(s), GetOutput::same_type()))
         .mean()])
         .collect()?;
     assert_eq!(out.column("b_mean")?.null_count(), 2);
+
+    Ok(())
+}
+
+#[test]
+fn test_shift_and_fill_window_function() -> Result<()> {
+    let df = fruits_cars();
+
+    // a ternary expression with a final list aggregation
+    let out1 = df
+        .clone()
+        .lazy()
+        .select(vec![
+            col("fruits"),
+            col("B")
+                .shift_and_fill(-1, lit(-1))
+                .over(vec![col("fruits")]),
+        ])
+        .collect()?;
+
+    // same expression, no final list aggregation
+    let out2 = df
+        .clone()
+        .lazy()
+        .select(vec![
+            col("fruits"),
+            col("B")
+                .shift_and_fill(-1, lit(-1))
+                .list()
+                .over(vec![col("fruits")]),
+        ])
+        .collect()?;
+
+    dbg!(&out1, &out2);
+
+    assert!(out1.frame_equal(&out2));
+
+    Ok(())
+}
+
+#[test]
+fn test_cumsum_agg_as_key() -> Result<()> {
+    let df = df![
+        "depth" => &[0i32, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        "soil" => &["peat", "peat", "peat", "silt", "silt", "silt", "sand", "sand", "peat", "peat"]
+    ]?;
+    // this checks if the grouper can work with the complex query as a key
+
+    let out = df
+        .lazy()
+        .groupby(vec![col("soil")
+            .neq(col("soil").shift_and_fill(1, col("soil").first()))
+            .cumsum(false)
+            .alias("key")])
+        .agg(vec![col("depth").max().keep_name()])
+        .sort("depth", false)
+        .collect()?;
+
+    assert_eq!(
+        Vec::from(out.column("key")?.u32()?),
+        &[Some(0), Some(1), Some(2), Some(3)]
+    );
+    assert_eq!(
+        Vec::from(out.column("depth")?.i32()?),
+        &[Some(2), Some(5), Some(7), Some(9)]
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_auto_list_agg() -> Result<()> {
+    let df = fruits_cars();
+
+    // test if alias executor adds a list after shift and fill
+    let out = df
+        .clone()
+        .lazy()
+        .groupby(vec![col("fruits")])
+        .agg(vec![col("B").shift_and_fill(-1, lit(-1)).alias("foo")])
+        .collect()?;
+
+    assert!(matches!(out.column("foo")?.dtype(), DataType::List(_)));
+
+    // test if it runs and groupby executor thus implements a list after shift_and_fill
+    let _out = df
+        .clone()
+        .lazy()
+        .groupby(vec![col("fruits")])
+        .agg(vec![col("B").shift_and_fill(-1, lit(-1))])
+        .collect()?;
+
+    // test if window expr executor adds list
+    let _out = df
+        .clone()
+        .lazy()
+        .select(vec![col("B").shift_and_fill(-1, lit(-1)).alias("foo")])
+        .collect()?;
+
+    let _out = df
+        .lazy()
+        .select(vec![col("B").shift_and_fill(-1, lit(-1))])
+        .collect()?;
+    Ok(())
+}
+
+#[test]
+fn test_exploded_window_function() -> Result<()> {
+    let df = fruits_cars();
+
+    let out = df
+        .clone()
+        .lazy()
+        .sort("fruits", false)
+        .select(vec![
+            col("fruits"),
+            col("B")
+                .shift(1)
+                .over(vec![col("fruits")])
+                .explode()
+                .alias("shifted"),
+        ])
+        .collect()?;
+
+    assert_eq!(
+        Vec::from(out.column("shifted")?.i32()?),
+        &[None, Some(3), None, Some(5), Some(4)]
+    );
+
+    // this tests if cast succeeds in aggregation context
+    // we implicitly also test that a literal does not upcast a column
+    let out = df
+        .lazy()
+        .sort("fruits", false)
+        .select(vec![
+            col("fruits"),
+            col("B")
+                .shift_and_fill(1, lit(-1.0))
+                .over(vec![col("fruits")])
+                .explode()
+                .alias("shifted"),
+        ])
+        .collect()?;
+
+    assert_eq!(
+        Vec::from(out.column("shifted")?.i32()?),
+        &[Some(-1), Some(3), Some(-1), Some(5), Some(4)]
+    );
+    Ok(())
+}
+
+#[test]
+fn test_reverse_in_groups() -> Result<()> {
+    let df = fruits_cars();
+
+    let out = df
+        .lazy()
+        .sort("fruits", false)
+        .select(vec![col("B")
+            .reverse()
+            .over(vec![col("fruits")])
+            .explode()
+            .alias("rev")])
+        .collect()?;
+
+    assert_eq!(
+        Vec::from(out.column("rev")?.i32()?),
+        &[Some(2), Some(3), Some(1), Some(4), Some(5)]
+    );
+    Ok(())
+}
+#[test]
+fn test_take_in_groups() -> Result<()> {
+    let df = fruits_cars();
+
+    let out = df
+        .lazy()
+        .sort("fruits", false)
+        .select(vec![col("B")
+            .take(lit(Series::new("", &[0u32])))
+            .over(vec![col("fruits")])
+            .explode()
+            .alias("taken")])
+        .collect()?;
+
+    assert_eq!(Vec::from(out.column("taken")?.i32()?), &[Some(3), Some(5)]);
+    Ok(())
+}
+
+#[test]
+fn test_sort_by_in_groups() -> Result<()> {
+    let df = fruits_cars();
+
+    let out = df
+        .lazy()
+        .sort("cars", false)
+        .select(vec![
+            col("fruits"),
+            col("cars"),
+            col("A")
+                .sort_by(col("B"), false)
+                .over(vec![col("cars")])
+                .explode()
+                .alias("sorted_A_by_B"),
+        ])
+        .collect()?;
+
+    assert_eq!(
+        Vec::from(out.column("sorted_A_by_B")?.i32()?),
+        &[Some(2), Some(5), Some(4), Some(3), Some(1)]
+    );
+    Ok(())
+}
+
+#[test]
+fn test_filter_after_shift_in_groups() -> Result<()> {
+    let df = fruits_cars();
+
+    let out = df
+        .lazy()
+        .select(vec![
+            col("fruits"),
+            col("B")
+                .shift(1)
+                .filter(col("B").shift(1).gt(lit(4)))
+                .over(vec![col("fruits")])
+                .alias("filtered"),
+        ])
+        .collect()?;
+
+    assert_eq!(
+        out.column("filtered")?
+            .list()?
+            .get(0)
+            .unwrap()
+            .i32()?
+            .get(0)
+            .unwrap(),
+        5
+    );
+    assert_eq!(
+        out.column("filtered")?
+            .list()?
+            .get(1)
+            .unwrap()
+            .i32()?
+            .get(0)
+            .unwrap(),
+        5
+    );
+    assert!(out
+        .column("filtered")?
+        .list()?
+        .get(2)
+        .unwrap()
+        .i32()?
+        .get(0)
+        .is_some());
+
+    Ok(())
+}
+
+#[test]
+fn test_lazy_ternary_predicate_pushdown() -> Result<()> {
+    let df = df![
+        "a" => &[10, 1, 2, 3]
+    ]?;
+
+    let out = df
+        .lazy()
+        .select(vec![when(col("a").eq(lit(10)))
+            .then(Null {}.lit())
+            .otherwise(col("a"))])
+        .drop_nulls(None)
+        .collect()?;
+
+    assert_eq!(
+        Vec::from(out.get_columns()[0].i32()?),
+        &[Some(1), Some(2), Some(3)]
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_categorical_addition() -> Result<()> {
+    let df = fruits_cars();
+
+    // test if we can do that arithmetic operation with utf8 and categorical
+    let out = df
+        .lazy()
+        .select(vec![
+            col("fruits").cast(DataType::Categorical),
+            col("cars").cast(DataType::Categorical),
+        ])
+        .select(vec![(col("fruits") + lit(" ") + col("cars")).alias("foo")])
+        .collect()?;
+
+    assert_eq!(out.column("foo")?.utf8()?.get(0).unwrap(), "banana beetle");
+
+    Ok(())
+}
+
+#[test]
+fn test_error_duplicate_names() {
+    let df = fruits_cars();
+    assert!(df
+        .lazy()
+        .select(vec![col("*"), col("*"),])
+        .collect()
+        .is_err());
+}
+
+#[test]
+fn test_filter_count() -> Result<()> {
+    let df = fruits_cars();
+    let out = df
+        .lazy()
+        .select(vec![col("fruits")
+            .filter(col("fruits").eq(lit("banana")))
+            .count()])
+        .collect()?;
+    assert_eq!(out.column("fruits")?.u32()?.get(0), Some(3));
+    Ok(())
+}
+
+#[test]
+fn test_groupby_small_ints() -> Result<()> {
+    let df = df![
+        "id_32" => [1i32, 2],
+        "id_16" => [1i16, 2]
+    ]?;
+
+    // https://github.com/pola-rs/polars/issues/1255
+    let out = df
+        .lazy()
+        .groupby(vec![col("id_16"), col("id_32")])
+        .agg(vec![col("id_16").sum().alias("foo")])
+        .sort("foo", true)
+        .collect()?;
+
+    assert_eq!(Vec::from(out.column("foo")?.i16()?), &[Some(2), Some(1)]);
+    Ok(())
+}
+
+#[test]
+fn test_when_then_schema() -> Result<()> {
+    let df = fruits_cars();
+
+    let schema = df
+        .lazy()
+        .select(vec![when(col("A").gt(lit(1)))
+            .then(Null {}.lit())
+            .otherwise(col("A"))])
+        .schema();
+    assert_ne!(schema.fields()[0].data_type(), &DataType::Null);
 
     Ok(())
 }

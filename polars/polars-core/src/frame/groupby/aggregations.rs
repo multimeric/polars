@@ -537,8 +537,11 @@ where
                     // group tuples are in bounds
                     unsafe {
                         av.extend(idx.iter().map(|idx| *values.get_unchecked(*idx as usize)));
+
+                        // Safety:
+                        // the allocation of offsets is sufficiently large to fit all offset data
+                        offsets.push_unchecked(length_so_far);
                     }
-                    offsets.push(length_so_far);
                 });
                 let values = av.into_primitive_array::<T>(None);
 
@@ -629,11 +632,7 @@ where
             }
 
             let group_vals = unsafe { self.take_unchecked(idx.iter().map(|i| *i as usize).into()) };
-            let sorted_idx_ca = group_vals.argsort(false);
-            let sorted_idx = sorted_idx_ca.downcast_iter().next().unwrap().values();
-            let quant_idx = (quantile * (sorted_idx.len() - 1) as f64) as usize;
-            let value_idx = sorted_idx[quant_idx];
-            group_vals.get(value_idx as usize)
+            group_vals.quantile(quantile).unwrap()
         })
     }
 

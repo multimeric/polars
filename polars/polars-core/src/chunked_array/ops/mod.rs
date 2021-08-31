@@ -10,6 +10,7 @@ use crate::prelude::*;
 use crate::utils::NoNull;
 
 pub use self::take::*;
+use polars_arrow::builder::BooleanArrayBuilder;
 
 pub(crate) mod aggregate;
 pub(crate) mod any_value;
@@ -17,24 +18,33 @@ pub(crate) mod apply;
 pub(crate) mod bit_repr;
 pub(crate) mod chunkops;
 pub(crate) mod compare_inner;
+#[cfg(feature = "cum_agg")]
 pub(crate) mod cum_agg;
 pub(crate) mod downcast;
 pub(crate) mod explode;
-pub(crate) mod fill_none;
+pub(crate) mod fill_null;
 pub(crate) mod filter;
+#[cfg(feature = "interpolate")]
+pub(crate) mod interpolate;
 #[cfg(feature = "is_in")]
 pub(crate) mod is_in;
 pub(crate) mod peaks;
 #[cfg(feature = "repeat_by")]
 pub(crate) mod repeat_by;
+#[cfg(feature = "rolling_window")]
+pub(crate) mod rolling_window;
 pub(crate) mod set;
 pub(crate) mod shift;
 pub(crate) mod sort;
 pub(crate) mod take;
 pub(crate) mod unique;
-pub(crate) mod window;
 #[cfg(feature = "zip_with")]
 pub(crate) mod zip;
+
+#[cfg(feature = "interpolate")]
+pub trait Interpolate {
+    fn interpolate(&self) -> Self;
+}
 
 #[cfg(feature = "reinterpret")]
 pub trait Reinterpret {
@@ -69,18 +79,19 @@ pub trait ChunkAnyValue {
     fn get_any_value(&self, index: usize) -> AnyValue;
 }
 
+#[cfg(feature = "cum_agg")]
 pub trait ChunkCumAgg<T> {
     /// Get an array with the cumulative max computed at every element
-    fn cum_max(&self, _reverse: bool) -> ChunkedArray<T> {
-        panic!("operation cum_max not supported for this dtype")
+    fn cummax(&self, _reverse: bool) -> ChunkedArray<T> {
+        panic!("operation cummax not supported for this dtype")
     }
     /// Get an array with the cumulative min computed at every element
-    fn cum_min(&self, _reverse: bool) -> ChunkedArray<T> {
-        panic!("operation cum_min not supported for this dtype")
+    fn cummin(&self, _reverse: bool) -> ChunkedArray<T> {
+        panic!("operation cummin not supported for this dtype")
     }
     /// Get an array with the cumulative sum computed at every element
-    fn cum_sum(&self, _reverse: bool) -> ChunkedArray<T> {
-        panic!("operation cum_sum not supported for this dtype")
+    fn cumsum(&self, _reverse: bool) -> ChunkedArray<T> {
+        panic!("operation cumsum not supported for this dtype")
     }
 }
 
@@ -93,9 +104,14 @@ pub trait ChunkTakeEvery<T> {
 /// Explode/ flatten a
 pub trait ChunkExplode {
     fn explode(&self) -> Result<Series> {
-        self.explode_and_offsets().map(|t| t.0)
+        unsafe { self.explode_and_offsets().map(|t| t.0) }
     }
-    fn explode_and_offsets(&self) -> Result<(Series, &[i64])>;
+
+    /// # Safety
+    /// lifetime bounded to returned Series. Don't store the &[i64]
+    /// Latest Series is only to keep ownership of &[i64] valid
+    /// TODO: fix this dirty hack and properly get offsets later.
+    unsafe fn explode_and_offsets(&self) -> Result<(Series, &[i64], Series)>;
 }
 
 pub trait ChunkBytes {
@@ -103,6 +119,7 @@ pub trait ChunkBytes {
 }
 
 /// Rolling window functions
+#[cfg(feature = "rolling_window")]
 pub trait ChunkWindow {
     /// apply a rolling sum (moving sum) over the values in this array.
     /// a window of length `window_size` will traverse the array. the values that fill this window
@@ -220,6 +237,7 @@ pub trait ChunkWindow {
 }
 
 /// Custom rolling window functions
+#[cfg(feature = "rolling_window")]
 pub trait ChunkWindowCustom<T> {
     /// Apply a rolling aggregation over the values in this array.
     ///
@@ -248,6 +266,21 @@ pub trait ChunkWindowCustom<T> {
     where
         F: Fn(Option<T>, Option<T>) -> Option<T> + Copy,
         Self: std::marker::Sized,
+    {
+        Err(PolarsError::InvalidOperation(
+            "rolling mean not supported for this datatype".into(),
+        ))
+    }
+}
+
+/// This differs from ChunkWindowCustom and ChunkWindow
+/// by not using a fold aggregator, but reusing a `Series` wrapper and calling `Series` aggregators.
+/// This likely is a bit slower than ChunkWindow
+#[cfg(feature = "rolling_window")]
+pub trait ChunkRollApply {
+    fn rolling_apply(&self, _window_size: usize, _f: &dyn Fn(&Series) -> Series) -> Result<Self>
+    where
+        Self: Sized,
     {
         Err(PolarsError::InvalidOperation(
             "rolling mean not supported for this datatype".into(),
@@ -439,6 +472,11 @@ pub trait ChunkApply<'a, A, B> {
     where
         F: Fn(A) -> B + Copy;
 
+    fn try_apply<F>(&'a self, f: F) -> Result<Self>
+    where
+        F: Fn(A) -> Result<B> + Copy,
+        Self: Sized;
+
     /// Apply a closure elementwise including null values.
     fn apply_on_opt<F>(&'a self, f: F) -> Self
     where
@@ -623,7 +661,7 @@ pub trait ChunkSort<T> {
 }
 
 #[derive(Copy, Clone, Debug)]
-pub enum FillNoneStrategy {
+pub enum FillNullStrategy {
     /// previous value in array
     Backward,
     /// next value in array
@@ -645,21 +683,21 @@ pub enum FillNoneStrategy {
 }
 
 /// Replace None values with various strategies
-pub trait ChunkFillNone {
+pub trait ChunkFillNull {
     /// Replace None values with one of the following strategies:
     /// * Forward fill (replace None with the previous value)
     /// * Backward fill (replace None with the next value)
     /// * Mean fill (replace None with the mean of the whole array)
     /// * Min fill (replace None with the minimum of the whole array)
     /// * Max fill (replace None with the maximum of the whole array)
-    fn fill_none(&self, strategy: FillNoneStrategy) -> Result<Self>
+    fn fill_null(&self, strategy: FillNullStrategy) -> Result<Self>
     where
         Self: Sized;
 }
 /// Replace None values with a value
-pub trait ChunkFillNoneValue<T> {
+pub trait ChunkFillNullValue<T> {
     /// Replace None values with a give value `T`.
-    fn fill_none_with_value(&self, value: T) -> Result<Self>
+    fn fill_null_with_values(&self, value: T) -> Result<Self>
     where
         Self: Sized;
 }
@@ -754,11 +792,22 @@ impl ChunkFull<&Series> for ListChunked {
 
 impl ChunkFullNull for ListChunked {
     fn full_null(name: &str, length: usize) -> ListChunked {
-        let mut ca = (0..length)
-            .map::<Option<Series>, _>(|_| None)
-            .collect::<Self>();
-        ca.rename(name);
-        ca
+        let values_builder = BooleanArrayBuilder::new(0);
+        let mut builder = ListBooleanChunkedBuilder::new(name, values_builder, length);
+        for _ in 0..length {
+            builder.append_null();
+        }
+        builder.finish()
+    }
+}
+
+impl ListChunked {
+    fn full_null_with_dtype(name: &str, length: usize, dt: &DataType) -> ListChunked {
+        let mut builder = get_list_builder(dt, 0, length, name);
+        for _ in 0..length {
+            builder.append_null();
+        }
+        builder.finish()
     }
 }
 

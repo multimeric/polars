@@ -107,6 +107,80 @@ macro_rules! impl_dyn_series {
         }
 
         impl private::PrivateSeries for SeriesWrap<$ca> {
+            #[cfg(feature = "rolling_window")]
+            fn _rolling_mean(
+                &self,
+                _window_size: u32,
+                _weight: Option<&[f64]>,
+                _ignore_null: bool,
+                _min_periods: u32,
+            ) -> Result<Series> {
+                Err(PolarsError::ComputeError(
+                    "cannot compute rolling mean of dates".into(),
+                ))
+            }
+            #[cfg(feature = "rolling_window")]
+            fn _rolling_sum(
+                &self,
+                _window_size: u32,
+                _weight: Option<&[f64]>,
+                _ignore_null: bool,
+                _min_periods: u32,
+            ) -> Result<Series> {
+                Err(PolarsError::ComputeError(
+                    "cannot compute rolling sum of dates".into(),
+                ))
+            }
+            #[cfg(feature = "rolling_window")]
+            fn _rolling_min(
+                &self,
+                window_size: u32,
+                weight: Option<&[f64]>,
+                ignore_null: bool,
+                min_periods: u32,
+            ) -> Result<Series> {
+                try_physical_dispatch!(
+                    self,
+                    rolling_min,
+                    window_size,
+                    weight,
+                    ignore_null,
+                    min_periods
+                )
+            }
+            #[cfg(feature = "rolling_window")]
+            fn _rolling_max(
+                &self,
+                window_size: u32,
+                weight: Option<&[f64]>,
+                ignore_null: bool,
+                min_periods: u32,
+            ) -> Result<Series> {
+                try_physical_dispatch!(
+                    self,
+                    rolling_max,
+                    window_size,
+                    weight,
+                    ignore_null,
+                    min_periods
+                )
+            }
+
+            #[cfg(feature = "cum_agg")]
+            fn _cummax(&self, reverse: bool) -> Series {
+                physical_dispatch!(self, cummax, reverse)
+            }
+
+            #[cfg(feature = "cum_agg")]
+            fn _cummin(&self, reverse: bool) -> Series {
+                physical_dispatch!(self, cummin, reverse)
+            }
+
+            #[cfg(feature = "cum_agg")]
+            fn _cumsum(&self, _reverse: bool) -> Series {
+                panic!("cannot sum dates")
+            }
+
             #[cfg(feature = "asof_join")]
             fn join_asof(&self, other: &Series) -> Result<Vec<Option<u32>>> {
                 cast_and_apply!(self, join_asof, other)
@@ -247,7 +321,7 @@ macro_rules! impl_dyn_series {
                         let rhs = rhs.cast_with_dtype(&DataType::Int64).unwrap();
                         Ok(lhs.subtract(&rhs)?.into_series())
                     }
-                    (dtl, dtr) => Err(PolarsError::Other(
+                    (dtl, dtr) => Err(PolarsError::ComputeError(
                         format!(
                             "cannot do subtraction on these date types: {:?}, {:?}",
                             dtl, dtr
@@ -257,18 +331,22 @@ macro_rules! impl_dyn_series {
                 }
             }
             fn add_to(&self, _rhs: &Series) -> Result<Series> {
-                Err(PolarsError::Other("cannot do addition on dates".into()))
+                Err(PolarsError::ComputeError(
+                    "cannot do addition on dates".into(),
+                ))
             }
             fn multiply(&self, _rhs: &Series) -> Result<Series> {
-                Err(PolarsError::Other(
+                Err(PolarsError::ComputeError(
                     "cannot do multiplication on dates".into(),
                 ))
             }
             fn divide(&self, _rhs: &Series) -> Result<Series> {
-                Err(PolarsError::Other("cannot do division on dates".into()))
+                Err(PolarsError::ComputeError(
+                    "cannot do division on dates".into(),
+                ))
             }
             fn remainder(&self, _rhs: &Series) -> Result<Series> {
-                Err(PolarsError::Other(
+                Err(PolarsError::ComputeError(
                     "cannot do remainder operation on dates".into(),
                 ))
             }
@@ -292,16 +370,9 @@ macro_rules! impl_dyn_series {
         }
 
         impl SeriesTrait for SeriesWrap<$ca> {
-            fn cum_max(&self, reverse: bool) -> Series {
-                physical_dispatch!(self, cum_max, reverse)
-            }
-
-            fn cum_min(&self, reverse: bool) -> Series {
-                physical_dispatch!(self, cum_min, reverse)
-            }
-
-            fn cum_sum(&self, _reverse: bool) -> Series {
-                panic!("cannot sum dates")
+            #[cfg(feature = "interpolate")]
+            fn interpolate(&self) -> Series {
+                physical_dispatch!(self, interpolate,)
             }
 
             fn rename(&mut self, name: &str) {
@@ -587,8 +658,8 @@ macro_rules! impl_dyn_series {
                 physical_dispatch!(self, shift, periods)
             }
 
-            fn fill_none(&self, strategy: FillNoneStrategy) -> Result<Series> {
-                try_physical_dispatch!(self, fill_none, strategy)
+            fn fill_null(&self, strategy: FillNullStrategy) -> Result<Series> {
+                try_physical_dispatch!(self, fill_null, strategy)
             }
 
             fn sum_as_series(&self) -> Series {
@@ -615,65 +686,6 @@ macro_rules! impl_dyn_series {
             fn quantile_as_series(&self, quantile: f64) -> Result<Series> {
                 try_physical_dispatch!(self, quantile_as_series, quantile)
             }
-            fn rolling_mean(
-                &self,
-                window_size: u32,
-                weight: Option<&[f64]>,
-                ignore_null: bool,
-                min_periods: u32,
-            ) -> Result<Series> {
-                try_physical_dispatch!(
-                    self,
-                    rolling_mean,
-                    window_size,
-                    weight,
-                    ignore_null,
-                    min_periods
-                )
-            }
-            fn rolling_sum(
-                &self,
-                _window_size: u32,
-                _weight: Option<&[f64]>,
-                _ignore_null: bool,
-                _min_periods: u32,
-            ) -> Result<Series> {
-                Err(PolarsError::Other(
-                    "cannot compute rolling sum of dates".into(),
-                ))
-            }
-            fn rolling_min(
-                &self,
-                window_size: u32,
-                weight: Option<&[f64]>,
-                ignore_null: bool,
-                min_periods: u32,
-            ) -> Result<Series> {
-                try_physical_dispatch!(
-                    self,
-                    rolling_min,
-                    window_size,
-                    weight,
-                    ignore_null,
-                    min_periods
-                )
-            }
-            fn rolling_max(
-                &self,
-                window_size: u32,
-                weight: Option<&[f64]>,
-                ignore_null: bool,
-                min_periods: u32,
-            ) -> Result<Series> {
-                try_physical_dispatch!(
-                    self,
-                    rolling_max,
-                    window_size,
-                    weight,
-                    ignore_null,
-                    min_periods
-                )
-            }
 
             fn fmt_list(&self) -> String {
                 FmtList::fmt_list(&self.0)
@@ -696,7 +708,9 @@ macro_rules! impl_dyn_series {
             }
 
             fn pow(&self, _exponent: f64) -> Result<Series> {
-                Err(PolarsError::Other("cannot compute power of dates".into()))
+                Err(PolarsError::ComputeError(
+                    "cannot compute power of dates".into(),
+                ))
             }
 
             fn peak_max(&self) -> BooleanChunked {

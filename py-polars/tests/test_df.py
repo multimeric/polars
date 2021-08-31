@@ -251,6 +251,8 @@ def test_selection():
     # more slicing
     expect = pl.DataFrame({"a": [3, 2, 1], "b": [3.0, 2.0, 1.0], "c": ["c", "b", "a"]})
     assert df[::-1].frame_equal(expect)
+    expect = pl.DataFrame({"a": [1, 2], "b": [1.0, 2.0], "c": ["a", "b"]})
+    assert df[:-1].frame_equal(expect)
 
     expect = pl.DataFrame({"a": [1, 3], "b": [1.0, 3.0], "c": ["a", "c"]})
     assert df[::2].frame_equal(expect)
@@ -538,6 +540,11 @@ def test_set():
     df["new"] = np.random.rand(10)
     df[df["new"] > 0.5, "new"] = 1
 
+    df = pl.DataFrame({"b": [0, 0]})
+    df[["A", "B"]] = [[1, 2], [1, 2]]
+    assert df["A"] == [1, 1]
+    assert df["B"] == [2, 2]
+
 
 def test_melt():
     df = pl.DataFrame({"A": ["a", "b", "c"], "B": [1, 3, 5], "C": [2, 4, 6]})
@@ -666,10 +673,10 @@ def test_df_fold():
 
     df = pl.DataFrame({"a": [3, 2, 1], "b": [1, 2, 3], "c": [1.0, 2.0, 3.0]})
     # just check dispatch. values are tested on rust side.
-    assert df.sum(axis=1).shape == (3, 1)
-    assert df.mean(axis=1).shape == (3, 1)
-    assert df.min(axis=1).shape == (3, 1)
-    assert df.max(axis=1).shape == (3, 1)
+    assert len(df.sum(axis=1)) == 3
+    assert len(df.mean(axis=1)) == 3
+    assert len(df.min(axis=1)) == 3
+    assert len(df.max(axis=1)) == 3
 
 
 def test_row_tuple():
@@ -711,16 +718,16 @@ def test_lazy_functions():
     assert pl.count(df["a"]) == 3
     out = df[
         [
-            pl.var("b"),
-            pl.std("b"),
-            pl.max("b"),
-            pl.min("b"),
-            pl.sum("b"),
-            pl.mean("b"),
-            pl.median("b"),
-            pl.n_unique("b"),
-            pl.first("b"),
-            pl.last("b"),
+            pl.var("b").alias("1"),
+            pl.std("b").alias("2"),
+            pl.max("b").alias("3"),
+            pl.min("b").alias("4"),
+            pl.sum("b").alias("5"),
+            pl.mean("b").alias("6"),
+            pl.median("b").alias("7"),
+            pl.n_unique("b").alias("8"),
+            pl.first("b").alias("9"),
+            pl.last("b").alias("10"),
         ]
     ]
     expected = 1.0
@@ -974,3 +981,22 @@ def test_hashing_on_python_objects():
 def test_drop_duplicates_unit_rows():
     # simply test if we don't panic.
     pl.DataFrame({"a": [1], "b": [None]}).drop_duplicates(subset="a")
+
+
+def test_panic():
+    # may contain some tests that yielded a panic in polars or arrow
+    # https://github.com/pola-rs/polars/issues/1110
+    a = pl.DataFrame(
+        {
+            "col1": ["a"] * 500 + ["b"] * 500,
+        }
+    )
+    a.filter(pl.col("col1") != "b")
+
+
+def test_h_agg():
+    df = pl.DataFrame({"a": [1, None, 3], "b": [1, 2, 3]})
+
+    assert df.sum(axis=1, null_strategy="ignore").to_list() == [2, 2, 6]
+    assert df.sum(axis=1, null_strategy="propagate").to_list() == [2, None, 6]
+    assert df.mean(axis=1, null_strategy="propagate")[1] is None

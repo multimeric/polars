@@ -4,7 +4,9 @@ use crate::frame::select::Selection;
 use crate::prelude::*;
 #[cfg(feature = "groupby_list")]
 use crate::utils::Wrap;
-use crate::utils::{accumulate_dataframes_vertical, set_partition_size, split_ca, NoNull};
+use crate::utils::{
+    accumulate_dataframes_vertical, copy_from_slice_unchecked, set_partition_size, split_ca, NoNull,
+};
 use crate::vector_hasher::{AsU64, StrHash};
 use crate::POOL;
 use ahash::RandomState;
@@ -190,6 +192,7 @@ where
 
 /// Used to tightly two 32 bit values and null information
 /// Only the bit values matter, not the meaning of the bits
+#[inline]
 fn pack_u32_tuples(opt_l: Option<u32>, opt_r: Option<u32>) -> [u8; 9] {
     // 4 bytes for first value
     // 4 bytes for second value
@@ -199,18 +202,18 @@ fn pack_u32_tuples(opt_l: Option<u32>, opt_r: Option<u32>) -> [u8; 9] {
     match (opt_l, opt_r) {
         (Some(l), Some(r)) => {
             // write to first 4 places
-            (&mut s[..4]).copy_from_slice(&l.to_ne_bytes());
+            unsafe { copy_from_slice_unchecked(&l.to_ne_bytes(), &mut s[..4]) }
             // write to second chunk of 4 places
-            (&mut s[4..8]).copy_from_slice(&r.to_ne_bytes());
+            unsafe { copy_from_slice_unchecked(&r.to_ne_bytes(), &mut s[4..8]) }
             // leave last byte as is
         }
         (Some(l), None) => {
-            (&mut s[..4]).copy_from_slice(&l.to_ne_bytes());
+            unsafe { copy_from_slice_unchecked(&l.to_ne_bytes(), &mut s[..4]) }
             // set right null bit
             s[8] = 1;
         }
         (None, Some(r)) => {
-            (&mut s[4..8]).copy_from_slice(&r.to_ne_bytes());
+            unsafe { copy_from_slice_unchecked(&r.to_ne_bytes(), &mut s[4..8]) }
             // set left null bit
             s[8] = 1 << 1;
         }
@@ -224,6 +227,7 @@ fn pack_u32_tuples(opt_l: Option<u32>, opt_r: Option<u32>) -> [u8; 9] {
 
 /// Used to tightly two 64 bit values and null information
 /// Only the bit values matter, not the meaning of the bits
+#[inline]
 fn pack_u64_tuples(opt_l: Option<u64>, opt_r: Option<u64>) -> [u8; 17] {
     // 8 bytes for first value
     // 8 bytes for second value
@@ -233,18 +237,18 @@ fn pack_u64_tuples(opt_l: Option<u64>, opt_r: Option<u64>) -> [u8; 17] {
     match (opt_l, opt_r) {
         (Some(l), Some(r)) => {
             // write to first 4 places
-            (&mut s[..8]).copy_from_slice(&l.to_ne_bytes());
+            unsafe { copy_from_slice_unchecked(&l.to_ne_bytes(), &mut s[..8]) }
             // write to second chunk of 4 places
-            (&mut s[8..16]).copy_from_slice(&r.to_ne_bytes());
+            unsafe { copy_from_slice_unchecked(&r.to_ne_bytes(), &mut s[8..16]) }
             // leave last byte as is
         }
         (Some(l), None) => {
-            (&mut s[..8]).copy_from_slice(&l.to_ne_bytes());
+            unsafe { copy_from_slice_unchecked(&l.to_ne_bytes(), &mut s[..8]) }
             // set right null bit
             s[16] = 1;
         }
         (None, Some(r)) => {
-            (&mut s[8..16]).copy_from_slice(&r.to_ne_bytes());
+            unsafe { copy_from_slice_unchecked(&r.to_ne_bytes(), &mut s[8..16]) }
             // set left null bit
             s[16] = 1 << 1;
         }
@@ -258,6 +262,7 @@ fn pack_u64_tuples(opt_l: Option<u64>, opt_r: Option<u64>) -> [u8; 17] {
 
 /// Used to tightly one 32 bit and a 64 bit valued type and null information
 /// Only the bit values matter, not the meaning of the bits
+#[inline]
 fn pack_u32_u64_tuples(opt_l: Option<u32>, opt_r: Option<u64>) -> [u8; 13] {
     // 8 bytes for first value
     // 8 bytes for second value
@@ -267,18 +272,18 @@ fn pack_u32_u64_tuples(opt_l: Option<u32>, opt_r: Option<u64>) -> [u8; 13] {
     match (opt_l, opt_r) {
         (Some(l), Some(r)) => {
             // write to first 4 places
-            (&mut s[..4]).copy_from_slice(&l.to_ne_bytes());
+            unsafe { copy_from_slice_unchecked(&l.to_ne_bytes(), &mut s[..4]) }
             // write to second chunk of 4 places
-            (&mut s[4..12]).copy_from_slice(&r.to_ne_bytes());
+            unsafe { copy_from_slice_unchecked(&r.to_ne_bytes(), &mut s[4..12]) }
             // leave last byte as is
         }
         (Some(l), None) => {
-            (&mut s[..4]).copy_from_slice(&l.to_ne_bytes());
+            unsafe { copy_from_slice_unchecked(&l.to_ne_bytes(), &mut s[..4]) }
             // set right null bit
             s[12] = 1;
         }
         (None, Some(r)) => {
-            (&mut s[4..12]).copy_from_slice(&r.to_ne_bytes());
+            unsafe { copy_from_slice_unchecked(&r.to_ne_bytes(), &mut s[4..12]) }
             // set left null bit
             s[12] = 1 << 1;
         }
@@ -292,6 +297,7 @@ fn pack_u32_u64_tuples(opt_l: Option<u32>, opt_r: Option<u64>) -> [u8; 13] {
 
 impl DataFrame {
     pub fn groupby_with_series(&self, by: Vec<Series>, multithreaded: bool) -> Result<GroupBy> {
+        use polars_arrow::utils::CustomIterTools;
         macro_rules! finish_packed_bit_path {
             ($ca0:expr, $ca1:expr, $pack_fn:expr) => {{
                 let n_partitions = set_partition_size();
@@ -310,7 +316,8 @@ impl DataFrame {
                             ca0.into_iter()
                                 .zip(ca1.into_iter())
                                 .map(|(l, r)| $pack_fn(l, r))
-                                .collect::<Vec<_>>()
+                                .trust_my_length(ca0.len())
+                                .collect_trusted::<Vec<_>>()
                         })
                         .collect::<Vec<_>>()
                 });
@@ -330,15 +337,16 @@ impl DataFrame {
             ));
         };
 
-        // make sure that categorical is used as uint32 in value type
+        use DataType::*;
+        // make sure that categorical and small integers are used as uint32 in value type
         let keys_df = DataFrame::new(
             by.iter()
                 .map(|s| match s.dtype() {
-                    DataType::Categorical => s.cast::<UInt32Type>().unwrap(),
-                    DataType::Float32 => s.bit_repr_small().into_series(),
+                    Categorical | Int8 | UInt8 | Int16 | UInt16 => s.cast::<UInt32Type>().unwrap(),
+                    Float32 => s.bit_repr_small().into_series(),
                     // otherwise we use the vec hash for float
                     #[cfg(feature = "dtype-u64")]
-                    DataType::Float64 => s.bit_repr_large().into_series(),
+                    Float64 => s.bit_repr_large().into_series(),
                     _ => {
                         // is date like
                         if !s.is_numeric() && s.is_numeric_physical() {
@@ -419,7 +427,7 @@ impl DataFrame {
     /// The groups are ordered by their smallest row index.
     pub fn groupby_stable<'g, J, S: Selection<'g, J>>(&self, by: S) -> Result<GroupBy> {
         let mut gb = self.groupby(by)?;
-        gb.groups.sort();
+        gb.groups.sort_unstable_by_key(|t| t.0);
         Ok(gb)
     }
 }
@@ -836,7 +844,7 @@ impl<'df, 'selection_str> GroupBy<'df, 'selection_str> {
     /// ```
     pub fn quantile(&self, quantile: f64) -> Result<DataFrame> {
         if !(0.0..=1.0).contains(&quantile) {
-            return Err(PolarsError::Other(
+            return Err(PolarsError::ComputeError(
                 "quantile should be within 0.0 and 1.0".into(),
             ));
         }

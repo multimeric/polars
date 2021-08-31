@@ -16,6 +16,7 @@ use crate::conversion::{ObjectValue, Wrap};
 use crate::datatypes::PyDataType;
 use crate::file::get_mmap_bytes_reader;
 use crate::lazy::dataframe::PyLazyFrame;
+use crate::prelude::str_to_null_strategy;
 use crate::utils::{downsample_str_to_rule, str_to_polarstype};
 use crate::{
     arrow_interop,
@@ -76,6 +77,7 @@ impl PyDataFrame {
         n_threads: Option<usize>,
         path: Option<String>,
         overwrite_dtype: Option<Vec<(&str, &PyAny)>>,
+        overwrite_dtype_slice: Option<Vec<&PyAny>>,
         low_memory: bool,
         comment_char: Option<&str>,
         null_values: Option<Wrap<NullValues>>,
@@ -104,6 +106,16 @@ impl PyDataFrame {
             Schema::new(fields)
         });
 
+        let overwrite_dtype_slice = overwrite_dtype_slice.map(|overwrite_dtype| {
+            overwrite_dtype
+                .iter()
+                .map(|dt| {
+                    let str_repr = dt.str().unwrap().to_str().unwrap();
+                    str_to_polarstype(str_repr)
+                })
+                .collect::<Vec<_>>()
+        });
+
         let mmap_bytes_r = get_mmap_bytes_reader(py_f)?;
         let df = CsvReader::new(mmap_bytes_r)
             .infer_schema(Some(infer_schema_length))
@@ -120,6 +132,7 @@ impl PyDataFrame {
             .with_n_threads(n_threads)
             .with_path(path)
             .with_dtypes(overwrite_dtype.as_ref())
+            .with_dtypes_slice(overwrite_dtype_slice.as_ref().map(|s| s.as_slice()))
             .low_memory(low_memory)
             .with_comment_char(comment_char)
             .with_null_values(null_values)
@@ -353,18 +366,18 @@ impl PyDataFrame {
         format!("{:?}", self.df)
     }
 
-    pub fn fill_none(&self, strategy: &str) -> PyResult<Self> {
+    pub fn fill_null(&self, strategy: &str) -> PyResult<Self> {
         let strat = match strategy {
-            "backward" => FillNoneStrategy::Backward,
-            "forward" => FillNoneStrategy::Forward,
-            "min" => FillNoneStrategy::Min,
-            "max" => FillNoneStrategy::Max,
-            "mean" => FillNoneStrategy::Mean,
-            "one" => FillNoneStrategy::One,
-            "zero" => FillNoneStrategy::Zero,
+            "backward" => FillNullStrategy::Backward,
+            "forward" => FillNullStrategy::Forward,
+            "min" => FillNullStrategy::Min,
+            "max" => FillNullStrategy::Max,
+            "mean" => FillNullStrategy::Mean,
+            "one" => FillNullStrategy::One,
+            "zero" => FillNullStrategy::Zero,
             s => return Err(PyPolarsEr::Other(format!("Strategy {} not supported", s)).into()),
         };
-        let df = self.df.fill_none(strat).map_err(PyPolarsEr::from)?;
+        let df = self.df.fill_null(strat).map_err(PyPolarsEr::from)?;
         Ok(PyDataFrame::new(df))
     }
 
@@ -716,7 +729,7 @@ impl PyDataFrame {
             "median" => pivot.median(),
             "sum" => pivot.sum(),
             "count" => pivot.count(),
-            a => Err(PolarsError::Other(
+            a => Err(PolarsError::ComputeError(
                 format!("agg fn {} does not exists", a).into(),
             )),
         };
@@ -789,8 +802,9 @@ impl PyDataFrame {
         self.df.median().into()
     }
 
-    pub fn hmean(&self) -> PyResult<Option<PySeries>> {
-        let s = self.df.hmean().map_err(PyPolarsEr::from)?;
+    pub fn hmean(&self, null_strategy: &str) -> PyResult<Option<PySeries>> {
+        let strategy = str_to_null_strategy(null_strategy)?;
+        let s = self.df.hmean(strategy).map_err(PyPolarsEr::from)?;
         Ok(s.map(|s| s.into()))
     }
 
@@ -804,8 +818,9 @@ impl PyDataFrame {
         Ok(s.map(|s| s.into()))
     }
 
-    pub fn hsum(&self) -> PyResult<Option<PySeries>> {
-        let s = self.df.hsum().map_err(PyPolarsEr::from)?;
+    pub fn hsum(&self, null_strategy: &str) -> PyResult<Option<PySeries>> {
+        let strategy = str_to_null_strategy(null_strategy)?;
+        let s = self.df.hsum(strategy).map_err(PyPolarsEr::from)?;
         Ok(s.map(|s| s.into()))
     }
 
@@ -891,6 +906,11 @@ impl PyDataFrame {
         let hash = self.df.hash_rows(Some(hb)).map_err(PyPolarsEr::from)?;
         Ok(hash.into_series().into())
     }
+
+    pub fn transpose(&self) -> PyResult<Self> {
+        let df = self.df.transpose().map_err(PyPolarsEr::from)?;
+        Ok(df.into())
+    }
 }
 
 fn finish_groupby(gb: GroupBy, agg: &str) -> PyResult<PyDataFrame> {
@@ -911,7 +931,7 @@ fn finish_groupby(gb: GroupBy, agg: &str) -> PyResult<PyDataFrame> {
         "groups" => gb.groups(),
         "std" => gb.std(),
         "var" => gb.var(),
-        a => Err(PolarsError::Other(
+        a => Err(PolarsError::ComputeError(
             format!("agg fn {} does not exists", a).into(),
         )),
     });

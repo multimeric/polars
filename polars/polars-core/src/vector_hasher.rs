@@ -1,10 +1,12 @@
 use crate::datatypes::UInt64Chunked;
 use crate::prelude::*;
+use crate::utils::arrow::array::Array;
 use crate::POOL;
 use ahash::RandomState;
 use arrow::array::ArrayRef;
 use hashbrown::{hash_map::RawEntryMut, HashMap};
-use itertools::Itertools;
+use polars_arrow::bitmap::AddIterBitmap;
+use polars_arrow::utils::CustomIterTools;
 use rayon::prelude::*;
 use std::convert::TryInto;
 use std::hash::{BuildHasher, BuildHasherDefault, Hash, Hasher};
@@ -26,6 +28,17 @@ pub trait VecHash {
     }
 }
 
+fn get_null_hash_value(random_state: RandomState) -> u64 {
+    // we just start with a large prime number and hash that twice
+    // to get a constant hash value for null/None
+    let mut hasher = random_state.build_hasher();
+    3188347919usize.hash(&mut hasher);
+    let first = hasher.finish();
+    let mut hasher = random_state.build_hasher();
+    first.hash(&mut hasher);
+    hasher.finish()
+}
+
 impl<T> VecHash for ChunkedArray<T>
 where
     T: PolarsIntegerType,
@@ -41,24 +54,65 @@ where
         let mut av = AlignedVec::with_capacity(self.len());
 
         self.downcast_iter().for_each(|arr| {
-            av.extend(arr.into_iter().map(|opt_v| {
+            av.extend(arr.values().iter().map(|v| {
                 let mut hasher = random_state.build_hasher();
-                opt_v.hash(&mut hasher);
+                v.hash(&mut hasher);
                 hasher.finish()
-            }))
+            }));
         });
+
+        let null_h = get_null_hash_value(random_state);
+        let hashes = av.as_mut_slice();
+
+        let mut offset = 0;
+        self.downcast_iter().for_each(|arr| {
+            if let Some(validity) = arr.data_ref().null_bitmap() {
+                validity
+                    .iter(arr.len())
+                    .zip(&mut hashes[offset..])
+                    .for_each(|(valid, h)| {
+                        if !valid {
+                            *h = null_h;
+                        }
+                    })
+            }
+            offset += arr.len();
+        });
+
         av
     }
 
     fn vec_hash_combine(&self, random_state: RandomState, hashes: &mut [u64]) {
-        self.apply_to_slice(
-            |opt_v, h| {
-                let mut hasher = random_state.build_hasher();
-                opt_v.hash(&mut hasher);
-                boost_hash_combine(hasher.finish(), *h)
-            },
-            hashes,
-        )
+        let null_h = get_null_hash_value(random_state.clone());
+
+        let mut offset = 0;
+        self.downcast_iter().for_each(|arr| {
+            match arr.null_count() {
+                0 => arr
+                    .values()
+                    .iter()
+                    .zip(&mut hashes[offset..])
+                    .for_each(|(v, h)| {
+                        let mut hasher = random_state.build_hasher();
+                        v.hash(&mut hasher);
+                        *h = boost_hash_combine(hasher.finish(), *h)
+                    }),
+                _ => arr
+                    .iter()
+                    .zip(&mut hashes[offset..])
+                    .for_each(|(opt_v, h)| match opt_v {
+                        Some(v) => {
+                            let mut hasher = random_state.build_hasher();
+                            v.hash(&mut hasher);
+                            *h = boost_hash_combine(hasher.finish(), *h)
+                        }
+                        None => {
+                            *h = boost_hash_combine(null_h, *h);
+                        }
+                    }),
+            }
+            offset += arr.len();
+        });
     }
 }
 
@@ -341,66 +395,6 @@ impl<'a> AsU64 for StrHash<'a> {
     }
 }
 
-impl From<u64> for NThreads {
-    fn from(n: u64) -> Self {
-        use NThreads::*;
-        match n {
-            2 => T2,
-            4 => T4,
-            8 => T8,
-            10 => T10,
-            12 => T12,
-            16 => T16,
-            20 => T20,
-            32 => T32,
-            40 => T40,
-            64 => T64,
-            _ => Other(n),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-pub enum NThreads {
-    T2,
-    T4,
-    T8,
-    T10,
-    T12,
-    T16,
-    T20,
-    T32,
-    T40,
-    T64,
-    Other(u64),
-}
-
-impl NThreads {
-    #[inline]
-    fn modulo(&self, h: u64) -> u64 {
-        use NThreads::*;
-        match self {
-            T2 => h % 2,
-            T4 => h % 4,
-            T8 => h % 8,
-            T10 => h % 10,
-            T12 => h % 12,
-            T16 => h % 16,
-            T20 => h % 20,
-            T32 => h % 32,
-            T40 => h % 20,
-            T64 => h % 64,
-            Other(n) => h % n,
-        }
-    }
-}
-
-/// Check if a hash should be processed in that thread.
-#[inline]
-pub fn this_thread(h: u64, thread_no: u64, n_threads: NThreads) -> bool {
-    n_threads.modulo(h + thread_no) == 0
-}
-
 #[inline]
 /// For partitions that are a power of 2 we can use a bitshift instead of a modulo.
 pub(crate) fn this_partition(h: u64, thread_no: u64, n_partitions: u64) -> bool {
@@ -412,24 +406,26 @@ pub(crate) fn prepare_hashed_relation_threaded<T, I>(
     iters: Vec<I>,
 ) -> Vec<HashMap<T, Vec<u32>, RandomState>>
 where
-    I: Iterator<Item = T> + Send,
+    I: Iterator<Item = T> + Send + TrustedLen,
     T: Send + Hash + Eq + Sync + Copy,
 {
-    let n_threads = iters.len();
+    let n_partitions = iters.len();
+    assert!(n_partitions.is_power_of_two());
+
     let (hashes_and_keys, build_hasher) = create_hash_and_keys_threaded_vectorized(iters, None);
 
     // We will create a hashtable in every thread.
     // We use the hash to partition the keys to the matching hashtable.
     // Every thread traverses all keys/hashes and ignores the ones that doesn't fall in that partition.
     POOL.install(|| {
-        (0..n_threads).into_par_iter().map(|thread_no| {
+        (0..n_partitions).into_par_iter().map(|partition_no| {
             let build_hasher = build_hasher.clone();
             let hashes_and_keys = &hashes_and_keys;
-            let thread_no = thread_no as u64;
+            let partition_no = partition_no as u64;
             let mut hash_tbl: HashMap<T, Vec<u32>, RandomState> =
                 HashMap::with_hasher(build_hasher);
 
-            let n_threads = (n_threads as u64).into();
+            let n_threads = n_partitions as u64;
             let mut offset = 0;
             for hashes_and_keys in hashes_and_keys {
                 let len = hashes_and_keys.len();
@@ -440,7 +436,7 @@ where
                         let idx = idx as u32;
                         // partition hashes by thread no.
                         // So only a part of the hashes go to this hashmap
-                        if this_thread(*h, thread_no, n_threads) {
+                        if this_partition(*h, partition_no, n_threads) {
                             let idx = idx + offset;
                             let entry = hash_tbl
                                 .raw_entry_mut()
@@ -473,6 +469,7 @@ pub(crate) fn create_hash_and_keys_threaded_vectorized<I, T>(
 ) -> (Vec<Vec<(u64, T)>>, RandomState)
 where
     I: IntoIterator<Item = T> + Send,
+    I::IntoIter: TrustedLen,
     T: Send + Hash + Eq,
 {
     let build_hasher = build_hasher.unwrap_or_default();
@@ -487,7 +484,7 @@ where
                         val.hash(&mut hasher);
                         (hasher.finish(), val)
                     })
-                    .collect_vec()
+                    .collect_trusted::<Vec<_>>()
             })
             .collect()
     });
@@ -496,7 +493,7 @@ where
 
 // hash combine from c++' boost lib
 #[inline]
-fn boost_hash_combine(l: u64, r: u64) -> u64 {
+pub(crate) fn boost_hash_combine(l: u64, r: u64) -> u64 {
     l ^ r.wrapping_add(0x9e3779b9u64.wrapping_add(l << 6).wrapping_add(r >> 2))
 }
 

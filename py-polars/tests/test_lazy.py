@@ -1,4 +1,7 @@
+from datetime import datetime
+
 import numpy as np
+import pytest
 
 import polars as pl
 from polars.datatypes import *
@@ -182,7 +185,7 @@ def test_window_function():
     out = q.collect()
     assert out["cars_max_B"] == [5, 4, 5, 5, 5]
 
-    out = df[[pl.first("B").over(["fruits", "cars"])]]
+    out = df[[pl.first("B").over(["fruits", "cars"]).alias("B_first")]]
     assert out["B_first"] == [5, 4, 3, 3, 5]
 
 
@@ -351,3 +354,180 @@ def test_regex_selection():
     ).lazy()
 
     assert df.select([col("^foo.*$")]).columns == ["foo", "fooey", "foobar"]
+
+
+def test_literal_projection():
+    df = pl.DataFrame({"a": [1, 2]})
+    assert df.select([True]).dtypes == [pl.Boolean]
+    assert df.select([1]).dtypes == [pl.Int32]
+    assert df.select([2.0]).dtypes == [pl.Float64]
+
+
+def test_to_python_datetime():
+    df = pl.DataFrame({"a": [1, 2, 3]})
+    assert (
+        df.select(col("a").cast(pl.Date64).dt.to_python_datetime())["a"].dtype
+        == pl.Object
+    )
+    assert df.select(col("a").cast(pl.Date64).dt.timestamp())["a"].dtype == pl.Int64
+
+
+def test_interpolate():
+    df = pl.DataFrame({"a": [1, None, 3]})
+    assert df.select(col("a").interpolate())["a"] == [1, 2, 3]
+    assert df["a"].interpolate() == [1, 2, 3]
+    assert df.interpolate()["a"] == [1, 2, 3]
+    assert df.lazy().interpolate().collect()["a"] == [1, 2, 3]
+
+
+def test_fill_nan():
+    df = pl.DataFrame({"a": [1.0, np.nan, 3.0]})
+    assert df.fill_nan(2.0)["a"] == [1.0, 2.0, 3.0]
+    assert df.lazy().fill_nan(2.0).collect()["a"] == [1.0, 2.0, 3.0]
+
+
+def test_take(fruits_cars):
+    df = fruits_cars
+
+    # out of bounds error
+    with pytest.raises(RuntimeError):
+        (
+            df.sort("fruits").select(
+                [col("B").reverse().take([1, 2]).list().over("fruits"), "fruits"]
+            )
+        )
+
+    out = df.sort("fruits").select(
+        [col("B").reverse().take([0, 1]).list().over("fruits"), "fruits"]
+    )
+
+    out[0, "B"] == [2, 3]
+    out[4, "B"] == [1, 4]
+
+
+def test_select_by_col_list(fruits_cars):
+    df = fruits_cars
+    out = df.select(col(["A", "B"]).sum())
+    out.columns == ["A", "B"]
+    out.shape == (1, 2)
+
+
+def test_rolling(fruits_cars):
+    df = fruits_cars
+    assert df.select(
+        [
+            col("A").rolling_min(3, min_periods=1).alias("1"),
+            col("A").rolling_mean(3, min_periods=1).alias("2"),
+            col("A").rolling_max(3, min_periods=1).alias("3"),
+            col("A").rolling_sum(3, min_periods=1).alias("4"),
+        ]
+    ).frame_equal(
+        pl.DataFrame(
+            {
+                "1": [1, 1, 1, 2, 3],
+                "2": [1, 1, 2, 3, 4],
+                "3": [1, 2, 3, 4, 5],
+                "5": [1, 3, 6, 9, 12],
+            }
+        )
+    )
+
+
+def test_rolling_apply():
+    s = pl.Series("A", [1.0, 2.0, 9.0, 2.0, 13.0])
+    out = s.rolling_apply(window_size=3, function=lambda s: s.std())
+    assert out[0] is None
+    assert out[1] is None
+    assert out[2] == 4.358898943540674
+
+
+def test_arr_namespace(fruits_cars):
+    df = fruits_cars
+    out = df.select(
+        [
+            "fruits",
+            col("B").over("fruits").arr.min().alias("B_by_fruits_min1"),
+            col("B").min().over("fruits").alias("B_by_fruits_min2"),
+            col("B").over("fruits").arr.max().alias("B_by_fruits_max1"),
+            col("B").max().over("fruits").alias("B_by_fruits_max2"),
+            col("B").over("fruits").arr.sum().alias("B_by_fruits_sum1"),
+            col("B").sum().over("fruits").alias("B_by_fruits_sum2"),
+            col("B").over("fruits").arr.mean().alias("B_by_fruits_mean1"),
+            col("B").mean().over("fruits").alias("B_by_fruits_mean2"),
+        ]
+    )
+    expected = pl.DataFrame(
+        {
+            "fruits": ["banana", "banana", "apple", "apple", "banana"],
+            "B_by_fruits_min1": [1, 1, 2, 2, 1],
+            "B_by_fruits_min2": [1, 1, 2, 2, 1],
+            "B_by_fruits_max1": [5, 5, 3, 3, 5],
+            "B_by_fruits_max2": [5, 5, 3, 3, 5],
+            "B_by_fruits_sum1": [10, 10, 5, 5, 10],
+            "B_by_fruits_sum2": [10, 10, 5, 5, 10],
+            "B_by_fruits_mean1": [
+                3.3333333333333335,
+                3.3333333333333335,
+                2.5,
+                2.5,
+                3.3333333333333335,
+            ],
+            "B_by_fruits_mean2": [
+                3.3333333333333335,
+                3.3333333333333335,
+                2.5,
+                2.5,
+                3.3333333333333335,
+            ],
+        }
+    )
+    assert out.frame_equal(expected, null_equal=True)
+
+
+def test_arithmetic():
+    df = pl.DataFrame({"a": [1, 2, 3]})
+
+    out = df.select(
+        [
+            (col("a") % 2).alias("1"),
+            (2 % col("a")).alias("2"),
+            (1 / col("a")).alias("3"),
+            (1 * col("a")).alias("4"),
+            (1 + col("a")).alias("5"),
+            (1 - col("a")).alias("6"),
+            (col("a") / 2).alias("7"),
+            (col("a") * 2).alias("8"),
+            (col("a") + 2).alias("9"),
+            (col("a") - 2).alias("10"),
+            -col("a").alias("11"),
+        ]
+    )
+    expected = pl.DataFrame(
+        {
+            "1": [1, 0, 1],
+            "2": [0, 0, 2],
+            "3": [1, 0, 0],
+            "4": [1, 2, 3],
+            "5": [2, 3, 4],
+            "6": [0, -1, -2],
+            "7": [0, 1, 1],
+            "8": [2, 4, 6],
+            "9": [3, 4, 5],
+            "10": [-1, 0, 1],
+            "11": [-1, -2, -3],
+        }
+    )
+    assert out.frame_equal(expected)
+
+
+def test_ufunc():
+    df = pl.DataFrame({"a": [1, 2]})
+    out = df.select(np.log(col("a")))
+    assert out["a"][1] == 0.6931471805599453
+
+
+def test_datetime_consistency():
+    dt = datetime(2021, 1, 1)
+    df = pl.DataFrame({"date": [dt]})
+    df["date"].dt[0] == dt
+    df.select(lit(dt))["literal"].dt[0] == dt

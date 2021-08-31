@@ -1,7 +1,7 @@
 use std::ops::{BitAnd, BitOr};
 
 use numpy::PyArray1;
-use pyo3::types::{PyList, PyTuple};
+use pyo3::types::{PyBytes, PyList, PyTuple};
 use pyo3::{exceptions::PyRuntimeError, prelude::*, Python};
 
 use polars::chunked_array::builder::get_bitmap;
@@ -136,22 +136,6 @@ impl From<Series> for PySeries {
     }
 }
 
-macro_rules! parse_temporal_from_str_slice {
-    ($name:ident, $ca_type:ident) => {
-        #[pymethods]
-        impl PySeries {
-            #[staticmethod]
-            pub fn $name(name: &str, val: Vec<&str>, fmt: &str) -> Self {
-                let parsed = $ca_type::parse_from_str_slice(name, &val, fmt);
-                PySeries::new(parsed.into_series())
-            }
-        }
-    };
-}
-
-// TODO: add other temporals
-parse_temporal_from_str_slice!(parse_date32_from_str_slice, Date32Chunked);
-
 #[pymethods]
 #[allow(
     clippy::wrong_self_convention,
@@ -232,16 +216,16 @@ impl PySeries {
         s.into()
     }
 
-    pub fn cum_sum(&self, reverse: bool) -> Self {
-        self.series.cum_sum(reverse).into()
+    pub fn cumsum(&self, reverse: bool) -> Self {
+        self.series.cumsum(reverse).into()
     }
 
-    pub fn cum_max(&self, reverse: bool) -> Self {
-        self.series.cum_max(reverse).into()
+    pub fn cummax(&self, reverse: bool) -> Self {
+        self.series.cummax(reverse).into()
     }
 
-    pub fn cum_min(&self, reverse: bool) -> Self {
-        self.series.cum_min(reverse).into()
+    pub fn cummin(&self, reverse: bool) -> Self {
+        self.series.cummin(reverse).into()
     }
 
     pub fn chunk_lengths(&self) -> Vec<usize> {
@@ -346,6 +330,10 @@ impl PySeries {
 
     pub fn div(&self, other: &PySeries) -> Self {
         (&self.series / &other.series).into()
+    }
+
+    pub fn rem(&self, other: &PySeries) -> Self {
+        (&self.series % &other.series).into()
     }
 
     pub fn head(&self, length: Option<usize>) -> Self {
@@ -603,18 +591,18 @@ impl PySeries {
         self.series.drop_nulls().into()
     }
 
-    pub fn fill_none(&self, strategy: &str) -> PyResult<Self> {
+    pub fn fill_null(&self, strategy: &str) -> PyResult<Self> {
         let strat = match strategy {
-            "backward" => FillNoneStrategy::Backward,
-            "forward" => FillNoneStrategy::Forward,
-            "min" => FillNoneStrategy::Min,
-            "max" => FillNoneStrategy::Max,
-            "mean" => FillNoneStrategy::Mean,
-            "zero" => FillNoneStrategy::Zero,
-            "one" => FillNoneStrategy::One,
+            "backward" => FillNullStrategy::Backward,
+            "forward" => FillNullStrategy::Forward,
+            "min" => FillNullStrategy::Min,
+            "max" => FillNullStrategy::Max,
+            "mean" => FillNullStrategy::Mean,
+            "zero" => FillNullStrategy::Zero,
+            "one" => FillNullStrategy::One,
             s => return Err(PyPolarsEr::Other(format!("Strategy {} not supported", s)).into()),
         };
-        let series = self.series.fill_none(strat).map_err(PyPolarsEr::from)?;
+        let series = self.series.fill_null(strat).map_err(PyPolarsEr::from)?;
         Ok(PySeries::new(series))
     }
 
@@ -927,28 +915,6 @@ impl PySeries {
         Ok(ca.into_series().into())
     }
 
-    pub fn as_duration(&self) -> PyResult<Self> {
-        match self.series.dtype() {
-            DataType::Date64 => Ok(self
-                .series
-                .cast::<DurationMillisecondType>()
-                .unwrap()
-                .into_series()
-                .into()),
-            DataType::Date32 => {
-                let s = self.series.cast::<Date64Type>().unwrap() * 3600 * 24 * 1000;
-                Ok(s.cast::<DurationMillisecondType>()
-                    .unwrap()
-                    .into_series()
-                    .into())
-            }
-            _ => Err(PyPolarsEr::Other(
-                "Only date32 and date64 can be transformed as duration".into(),
-            )
-            .into()),
-        }
-    }
-
     pub fn to_dummies(&self) -> PyResult<PyDataFrame> {
         let df = self.series.to_dummies().map_err(PyPolarsEr::from)?;
         Ok(df.into())
@@ -1140,6 +1106,35 @@ impl PySeries {
     pub fn mode(&self) -> PyResult<Self> {
         let s = self.series.mode().map_err(PyPolarsEr::from)?;
         Ok(s.into())
+    }
+
+    pub fn interpolate(&self) -> Self {
+        let s = self.series.interpolate();
+        s.into()
+    }
+
+    pub fn __getstate__(&self, py: Python) -> PyResult<PyObject> {
+        Ok(PyBytes::new(py, &bincode::serialize(&self.series).unwrap()).to_object(py))
+    }
+
+    pub fn __setstate__(&mut self, py: Python, state: PyObject) -> PyResult<()> {
+        match state.extract::<&PyBytes>(py) {
+            Ok(s) => {
+                self.series = bincode::deserialize(s.as_bytes()).unwrap();
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn rank(&self, method: &str) -> PyResult<Self> {
+        let method = str_to_rankmethod(method)?;
+        Ok(self.series.rank(method).into())
+    }
+
+    pub fn diff(&self, n: usize, null_behavior: &str) -> PyResult<Self> {
+        let null_behavior = str_to_null_behavior(null_behavior)?;
+        Ok(self.series.diff(n, null_behavior).into())
     }
 }
 
@@ -1402,6 +1397,16 @@ impl_arithmetic!(mul_i32, i32, *);
 impl_arithmetic!(mul_i64, i64, *);
 impl_arithmetic!(mul_f32, f32, *);
 impl_arithmetic!(mul_f64, f64, *);
+impl_arithmetic!(rem_u8, u8, %);
+impl_arithmetic!(rem_u16, u16, %);
+impl_arithmetic!(rem_u32, u32, %);
+impl_arithmetic!(rem_u64, u64, %);
+impl_arithmetic!(rem_i8, i8, %);
+impl_arithmetic!(rem_i16, i16, %);
+impl_arithmetic!(rem_i32, i32, %);
+impl_arithmetic!(rem_i64, i64, %);
+impl_arithmetic!(rem_f32, f32, %);
+impl_arithmetic!(rem_f64, f64, %);
 
 macro_rules! impl_rhs_arithmetic {
     ($name:ident, $type:ty, $operand:ident) => {
@@ -1454,6 +1459,16 @@ impl_rhs_arithmetic!(mul_i32_rhs, i32, mul);
 impl_rhs_arithmetic!(mul_i64_rhs, i64, mul);
 impl_rhs_arithmetic!(mul_f32_rhs, f32, mul);
 impl_rhs_arithmetic!(mul_f64_rhs, f64, mul);
+impl_rhs_arithmetic!(rem_u8_rhs, u8, rem);
+impl_rhs_arithmetic!(rem_u16_rhs, u16, rem);
+impl_rhs_arithmetic!(rem_u32_rhs, u32, rem);
+impl_rhs_arithmetic!(rem_u64_rhs, u64, rem);
+impl_rhs_arithmetic!(rem_i8_rhs, i8, rem);
+impl_rhs_arithmetic!(rem_i16_rhs, i16, rem);
+impl_rhs_arithmetic!(rem_i32_rhs, i32, rem);
+impl_rhs_arithmetic!(rem_i64_rhs, i64, rem);
+impl_rhs_arithmetic!(rem_f32_rhs, f32, rem);
+impl_rhs_arithmetic!(rem_f64_rhs, f64, rem);
 
 macro_rules! impl_eq_num {
     ($name:ident, $type:ty) => {

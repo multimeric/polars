@@ -32,6 +32,14 @@ impl<T> PrivateSeries for SeriesWrap<ObjectChunked<T>>
 where
     T: PolarsObject,
 {
+    fn agg_first(&self, _groups: &[(u32, Vec<u32>)]) -> Series {
+        self.0.agg_first(_groups)
+    }
+
+    fn agg_last(&self, _groups: &[(u32, Vec<u32>)]) -> Series {
+        self.0.agg_last(_groups)
+    }
+
     fn str_value(&self, index: usize) -> Cow<str> {
         match (&self.0).get(index) {
             None => Cow::Borrowed("null"),
@@ -60,6 +68,11 @@ impl<T> SeriesTrait for SeriesWrap<ObjectChunked<T>>
 where
     T: PolarsObject,
 {
+    #[cfg(feature = "interpolate")]
+    fn interpolate(&self) -> Series {
+        self.0.interpolate().into_series()
+    }
+
     fn rename(&mut self, name: &str) {
         ObjectChunked::rename(&mut self.0, name)
     }
@@ -235,8 +248,8 @@ where
         ChunkShift::shift(&self.0, periods).into_series()
     }
 
-    fn fill_none(&self, strategy: FillNoneStrategy) -> Result<Series> {
-        ChunkFillNone::fill_none(&self.0, strategy).map(|ca| ca.into_series())
+    fn fill_null(&self, strategy: FillNullStrategy) -> Result<Series> {
+        ChunkFillNull::fill_null(&self.0, strategy).map(|ca| ca.into_series())
     }
 
     fn fmt_list(&self) -> String {

@@ -109,6 +109,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "904dfeac50f3cdaba28fc6f57fdcddb75f49ed61346676a78c4ffe55877802fd"
 
 [[package]]
+name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "bitflags"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -987,7 +996,7 @@ dependencies = [
 
 [[package]]
 name = "polars"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "polars-core",
  "polars-io",
@@ -996,7 +1005,7 @@ dependencies = [
 
 [[package]]
 name = "polars-arrow"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "arrow",
  "num",
@@ -1005,7 +1014,7 @@ dependencies = [
 
 [[package]]
 name = "polars-core"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1033,7 +1042,7 @@ dependencies = [
 
 [[package]]
 name = "polars-io"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1057,7 +1066,7 @@ dependencies = [
 
 [[package]]
 name = "polars-lazy"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "ahash",
  "itertools",
@@ -1105,9 +1114,10 @@ dependencies = [
 
 [[package]]
 name = "py-polars"
-version = "0.8.17"
+version = "0.8.26"
 dependencies = [
  "ahash",
+ "bincode",
  "libc",
  "mimalloc",
  "ndarray",

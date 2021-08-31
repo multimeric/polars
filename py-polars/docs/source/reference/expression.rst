@@ -102,24 +102,34 @@ Computations
 .. autosummary::
    :toctree: api/
 
-    Expr.cum_sum
-    Expr.cum_min
-    Expr.cum_max
+    Expr.cumsum
+    Expr.cummin
+    Expr.cummax
     Expr.dot
     Expr.mode
     Expr.n_unique
     Expr.arg_unique
     Expr.unique
     Expr.pow
+    Expr.rolling_min
+    Expr.rolling_max
+    Expr.rolling_mean
+    Expr.rolling_sum
+    Expr.rolling_apply
     Expr.hash
+    Expr.abs
+    Expr.rank
+    Expr.diff
 
 Manipulation/ selection
 -----------------------
 .. autosummary::
    :toctree: api/
 
+    Expr.inspect
     Expr.slice
     Expr.explode
+    Expr.flatten
     Expr.take_every
     Expr.repeat_by
     Expr.round
@@ -130,7 +140,7 @@ Manipulation/ selection
     Expr.take
     Expr.shift
     Expr.shift_and_fill
-    Expr.fill_none
+    Expr.fill_null
     Expr.forward_fill
     Expr.backward_fill
     Expr.reverse
@@ -139,6 +149,8 @@ Manipulation/ selection
     Expr.tail
     Expr.reinterpret
     Expr.drop_nulls
+    Expr.interpolate
+    Expr.argsort
 
 Column names
 ------------
@@ -156,6 +168,8 @@ Column names
 
     Expr.alias
     Expr.keep_name
+    Expr.prefix
+    Expr.suffix
     Expr.exclude
 
 Apply
@@ -185,6 +199,8 @@ The following methods are available under the `expr.dt` attribute.
     ExprDateTimeNameSpace.strftime
     ExprDateTimeNameSpace.year
     ExprDateTimeNameSpace.month
+    ExprDateTimeNameSpace.week
+    ExprDateTimeNameSpace.weekday
     ExprDateTimeNameSpace.day
     ExprDateTimeNameSpace.ordinal_day
     ExprDateTimeNameSpace.hour
@@ -192,6 +208,8 @@ The following methods are available under the `expr.dt` attribute.
     ExprDateTimeNameSpace.second
     ExprDateTimeNameSpace.nanosecond
     ExprDateTimeNameSpace.round
+    ExprDateTimeNameSpace.to_python_datetime
+    ExprDateTimeNameSpace.timestamp
 
 Strings
 -------
@@ -212,3 +230,20 @@ The following methods are available under the `Expr.str` attribute.
     ExprStringNameSpace.replace
     ExprStringNameSpace.replace_all
     ExprStringNameSpace.slice
+
+Lists
+-----
+The following methods are available under the `expr.arr` attribute.
+
+.. currentmodule:: polars.lazy.expr
+
+.. autosummary::
+   :toctree: api/
+
+    ExprListNameSpace.sum
+    ExprListNameSpace.min
+    ExprListNameSpace.max
+    ExprListNameSpace.mean
+    ExprListNameSpace.sort
+    ExprListNameSpace.reverse
+    ExprListNameSpace.unique

@@ -1,8 +1,8 @@
+use crate::physical_plan::expressions::utils::as_aggregated;
 use crate::physical_plan::state::ExecutionState;
 use crate::prelude::*;
 use polars_core::frame::groupby::GroupTuples;
 use polars_core::prelude::*;
-use std::borrow::Cow;
 use std::sync::Arc;
 
 pub struct AliasExpr {
@@ -41,9 +41,11 @@ impl PhysicalExpr for AliasExpr {
         df: &DataFrame,
         groups: &'a GroupTuples,
         state: &ExecutionState,
-    ) -> Result<(Series, Cow<'a, GroupTuples>)> {
-        let (series, groups) = self.physical_expr.evaluate_on_groups(df, groups, state)?;
-        Ok((self.finish(series)?, groups))
+    ) -> Result<AggregationContext<'a>> {
+        let mut ac = self.physical_expr.evaluate_on_groups(df, groups, state)?;
+        let s = ac.take();
+        ac.with_series(self.finish(s)?);
+        Ok(ac)
     }
 
     fn to_field(&self, input_schema: &Schema) -> Result<Field> {
@@ -68,8 +70,7 @@ impl PhysicalAggregation for AliasExpr {
         groups: &GroupTuples,
         state: &ExecutionState,
     ) -> Result<Option<Series>> {
-        let agg_expr = self.physical_expr.as_agg_expr()?;
-        let opt_agg = agg_expr.aggregate(df, groups, state)?;
+        let opt_agg = as_aggregated(self.physical_expr.as_ref(), df, groups, state)?;
         Ok(opt_agg.map(|mut agg| {
             agg.rename(&self.name);
             agg

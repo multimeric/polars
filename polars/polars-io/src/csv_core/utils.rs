@@ -40,9 +40,7 @@ pub(crate) fn get_file_chunks(
     offsets
 }
 
-pub(crate) fn get_reader_bytes<R: Read + MmapBytesReader>(
-    reader: &mut R,
-) -> Result<ReaderBytes<'_>> {
+pub fn get_reader_bytes<R: Read + MmapBytesReader>(reader: &mut R) -> Result<ReaderBytes<'_>> {
     // we have a file so we can mmap
     if let Some(file) = reader.to_file() {
         let mmap = unsafe { memmap::Mmap::map(file)? };
@@ -67,7 +65,7 @@ pub(crate) fn get_reader_bytes<R: Read + MmapBytesReader>(
 }
 
 lazy_static! {
-    static ref DECIMAL_RE: Regex = Regex::new(r"^\s*-?(\d+\.\d+)$").unwrap();
+    static ref FLOAT_RE: Regex = Regex::new(r"^\s*-?((\d*\.\d+)[eE]?[-\+]?\d*)|inf|NaN$").unwrap();
     static ref INTEGER_RE: Regex = Regex::new(r"^\s*-?(\d+)$").unwrap();
     static ref BOOLEAN_RE: Regex = RegexBuilder::new(r"^\s*(true)$|^(false)$")
         .case_insensitive(true)
@@ -85,7 +83,7 @@ fn infer_field_schema(string: &str) -> DataType {
     // match regex in a particular order
     if BOOLEAN_RE.is_match(string) {
         DataType::Boolean
-    } else if DECIMAL_RE.is_match(string) {
+    } else if FLOAT_RE.is_match(string) {
         DataType::Float64
     } else if INTEGER_RE.is_match(string) {
         DataType::Int64
@@ -111,8 +109,8 @@ pub(crate) fn parse_bytes_with_encoding(bytes: &[u8], encoding: CsvEncoding) -> 
 /// If `max_read_records` is not set, the whole file is read to infer its schema.
 ///
 /// Return inferred schema and number of records used for inference.
-pub fn infer_file_schema<R: Read + MmapBytesReader>(
-    reader: &mut R,
+pub fn infer_file_schema(
+    reader_bytes: &ReaderBytes,
     delimiter: u8,
     max_read_records: Option<usize>,
     has_header: bool,
@@ -124,8 +122,7 @@ pub fn infer_file_schema<R: Read + MmapBytesReader>(
     // It may later.
     let encoding = CsvEncoding::LossyUtf8;
 
-    let reader_bytes = get_reader_bytes(reader)?;
-    let bytes = &skip_line_ending(skip_whitespace(skip_bom(&reader_bytes)).0).0;
+    let bytes = &skip_line_ending(skip_whitespace(skip_bom(reader_bytes)).0).0;
     let mut lines = SplitLines::new(bytes, b'\n').skip(skip_rows);
 
     // get or create header names
@@ -261,7 +258,7 @@ pub(crate) fn decompress(bytes: &[u8]) -> Option<Vec<u8>> {
 
     if bytes.starts_with(&gzip) {
         let mut out = Vec::with_capacity(bytes.len());
-        let mut decoder = flate2::read::GzDecoder::new(bytes);
+        let mut decoder = flate2::read::MultiGzDecoder::new(bytes);
         decoder.read_to_end(&mut out).ok()?;
         Some(out)
     } else if bytes.starts_with(&zlib0) || bytes.starts_with(&zlib1) || bytes.starts_with(&zlib2) {
@@ -274,31 +271,27 @@ pub(crate) fn decompress(bytes: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-#[cfg(feature = "decompress")]
-/// Schema inference needs to be done again after decompression
-pub(crate) fn bytes_to_schema(
-    bytes: &[u8],
-    delimiter: u8,
-    has_header: bool,
-    skip_rows: usize,
-    comment_char: Option<u8>,
-) -> Result<Schema> {
-    let mut r = std::io::Cursor::new(&bytes);
-    Ok(infer_file_schema(
-        &mut r,
-        delimiter,
-        Some(100),
-        has_header,
-        None,
-        skip_rows,
-        comment_char,
-    )?
-    .0)
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn test_float_parse() {
+        assert!(FLOAT_RE.is_match("0.1"));
+        assert!(FLOAT_RE.is_match("3.0"));
+        assert!(FLOAT_RE.is_match("3.00001"));
+        assert!(FLOAT_RE.is_match("-9.9990e-003"));
+        assert!(FLOAT_RE.is_match("9.9990e+003"));
+        assert!(FLOAT_RE.is_match("9.9990E+003"));
+        assert!(FLOAT_RE.is_match("9.9990E+003"));
+        assert!(FLOAT_RE.is_match(".5"));
+        assert!(FLOAT_RE.is_match("2.5E-10"));
+        assert!(FLOAT_RE.is_match("2.5e10"));
+        assert!(FLOAT_RE.is_match("NaN"));
+        assert!(FLOAT_RE.is_match("-NaN"));
+        assert!(FLOAT_RE.is_match("-inf"));
+        assert!(FLOAT_RE.is_match("inf"));
+    }
 
     #[test]
     fn test_get_file_chunks() {

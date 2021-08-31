@@ -58,7 +58,7 @@ impl PhysicalExpr for LiteralExpr {
                 }
                 DataType::UInt32 => {
                     if *low >= 0 || *high <= u32::MAX as i64 {
-                        return Err(PolarsError::Other(
+                        return Err(PolarsError::ComputeError(
                             "range not within bounds of u32 type".into(),
                         ));
                     }
@@ -91,8 +91,9 @@ impl PhysicalExpr for LiteralExpr {
         df: &DataFrame,
         groups: &'a GroupTuples,
         state: &ExecutionState,
-    ) -> Result<(Series, Cow<'a, GroupTuples>)> {
-        Ok((self.evaluate(df, state)?, Cow::Borrowed(groups)))
+    ) -> Result<AggregationContext<'a>> {
+        let s = self.evaluate(df, state)?;
+        Ok(AggregationContext::new(s, Cow::Borrowed(groups)))
     }
 
     fn to_field(&self, _input_schema: &Schema) -> Result<Field> {

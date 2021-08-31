@@ -2,6 +2,8 @@ import typing as tp
 from datetime import datetime
 from typing import Any, Callable, Optional, Sequence, Type, Union
 
+import numpy as np
+
 import polars as pl
 
 try:
@@ -12,7 +14,7 @@ except ImportError:
     _DOCUMENTING = True
 
 from ..datatypes import Boolean, DataType, Date32, Date64, Float64, Int64, Utf8
-from .functions import UDF, col, lit
+from .functions import col, lit
 
 __all__ = [
     "Expr",
@@ -28,6 +30,8 @@ def _selection_to_pyexpr_list(
     pyexpr_list: tp.List[PyExpr]
     if isinstance(exprs, str):
         pyexpr_list = [col(exprs)._pyexpr]
+    elif isinstance(exprs, (bool, int, float)):
+        pyexpr_list = [lit(exprs)._pyexpr]
     elif isinstance(exprs, Expr):
         pyexpr_list = [exprs._pyexpr]
     else:
@@ -35,6 +39,8 @@ def _selection_to_pyexpr_list(
         for expr in exprs:
             if isinstance(expr, str):
                 expr = col(expr)
+            elif isinstance(expr, (bool, int, float)):
+                expr = lit(expr)
             pyexpr_list.append(expr._pyexpr)
     return pyexpr_list
 
@@ -74,22 +80,46 @@ class Expr:
         return self.is_not()
 
     def __and__(self, other: "Expr") -> "Expr":
-        return wrap_expr(self._pyexpr._and(other._pyexpr))
+        return wrap_expr(self._pyexpr._and(self.__to_pyexpr(other)))
+
+    def __rand__(self, other: Any) -> "Expr":
+        return wrap_expr(self._pyexpr._and(self.__to_pyexpr(other)))
 
     def __or__(self, other: "Expr") -> "Expr":
-        return wrap_expr(self._pyexpr._or(other._pyexpr))
+        return wrap_expr(self._pyexpr._or(self.__to_pyexpr(other)))
+
+    def __ror__(self, other: Any) -> "Expr":
+        return wrap_expr(self.__to_pyexpr(other)._or(self._pyexpr))
 
     def __add__(self, other: Any) -> "Expr":
         return wrap_expr(self._pyexpr + self.__to_pyexpr(other))
 
+    def __radd__(self, other: Any) -> "Expr":
+        return wrap_expr(self.__to_pyexpr(other) + self._pyexpr)
+
     def __sub__(self, other: Any) -> "Expr":
         return wrap_expr(self._pyexpr - self.__to_pyexpr(other))
+
+    def __rsub__(self, other: Any) -> "Expr":
+        return wrap_expr(self.__to_pyexpr(other) - self._pyexpr)
 
     def __mul__(self, other: Any) -> "Expr":
         return wrap_expr(self._pyexpr * self.__to_pyexpr(other))
 
+    def __rmul__(self, other: Any) -> "Expr":
+        return wrap_expr(self.__to_pyexpr(other) * self._pyexpr)
+
     def __truediv__(self, other: Any) -> "Expr":
         return wrap_expr(self._pyexpr / self.__to_pyexpr(other))
+
+    def __rtruediv__(self, other: Any) -> "Expr":
+        return wrap_expr(self.__to_pyexpr(other) / self._pyexpr)
+
+    def __mod__(self, other: Any) -> "Expr":
+        return wrap_expr(self._pyexpr % self.__to_pyexpr(other))
+
+    def __rmod__(self, other: Any) -> "Expr":
+        return wrap_expr(self.__to_pyexpr(other) % self._pyexpr)
 
     def __pow__(self, power: float, modulo: None = None) -> "Expr":
         return self.pow(power)
@@ -129,6 +159,28 @@ class Expr:
 
     def lt(self, other: "Expr") -> "Expr":
         return wrap_expr(self._pyexpr.lt(other._pyexpr))
+
+    def __neg__(self) -> "Expr":
+        return pl.lit(0) - self  # type: ignore
+
+    def __array_ufunc__(
+        self, ufunc: Callable[..., Any], method: str, *inputs: Any, **kwargs: Any
+    ) -> "Expr":
+        """
+        Numpy universal functions.
+        """
+        out_type = ufunc(np.array([1])).dtype
+        if "float" in str(out_type):
+            dtype = pl.Float64  # type: ignore
+        else:
+            dtype = None  # type: ignore
+
+        def function(s: "pl.Series") -> "pl.Series":
+            return ufunc(s, **kwargs)
+
+        if "dtype" in kwargs:
+            return self.map(function, return_dtype=kwargs["dtype"])
+        return self.map(function, return_dtype=dtype)
 
     def alias(self, name: str) -> "Expr":
         """
@@ -279,6 +331,114 @@ class Expr:
 
         return wrap_expr(self._pyexpr.keep_name())
 
+    def prefix(self, prefix: str) -> "Expr":
+        """
+        Add a prefix the to root column name of the expression.
+
+        Examples
+        --------
+
+        >>> df = pl.DataFrame(
+        >>> {
+        >>>     "A": [1, 2, 3, 4, 5],
+        >>>     "fruits": ["banana", "banana", "apple", "apple", "banana"],
+        >>>     "B": [5, 4, 3, 2, 1],
+        >>>     "cars": ["beetle", "audi", "beetle", "beetle", "beetle"],
+        >>> })
+        shape: (5, 4)
+        ╭─────┬──────────┬─────┬──────────╮
+        │ A   ┆ fruits   ┆ B   ┆ cars     │
+        │ --- ┆ ---      ┆ --- ┆ ---      │
+        │ i64 ┆ str      ┆ i64 ┆ str      │
+        ╞═════╪══════════╪═════╪══════════╡
+        │ 1   ┆ "banana" ┆ 5   ┆ "beetle" │
+        ├╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┤
+        │ 2   ┆ "banana" ┆ 4   ┆ "audi"   │
+        ├╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┤
+        │ 3   ┆ "apple"  ┆ 3   ┆ "beetle" │
+        ├╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┤
+        │ 4   ┆ "apple"  ┆ 2   ┆ "beetle" │
+        ├╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┤
+        │ 5   ┆ "banana" ┆ 1   ┆ "beetle" │
+        ╰─────┴──────────┴─────┴──────────╯
+        >>> (df.select([
+        >>> pl.all(),
+        >>> pl.all().reverse().suffix("_reverse")
+        >>> ]))
+        shape: (5, 8)
+        ╭─────┬──────────┬─────┬──────────┬───────────┬────────────────┬───────────┬──────────────╮
+        │ A   ┆ fruits   ┆ B   ┆ cars     ┆ A_reverse ┆ fruits_reverse ┆ B_reverse ┆ cars_reverse │
+        │ --- ┆ ---      ┆ --- ┆ ---      ┆ ---       ┆ ---            ┆ ---       ┆ ---          │
+        │ i64 ┆ str      ┆ i64 ┆ str      ┆ i64       ┆ str            ┆ i64       ┆ str          │
+        ╞═════╪══════════╪═════╪══════════╪═══════════╪════════════════╪═══════════╪══════════════╡
+        │ 1   ┆ "banana" ┆ 5   ┆ "beetle" ┆ 5         ┆ "banana"       ┆ 1         ┆ "beetle"     │
+        ├╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+        │ 2   ┆ "banana" ┆ 4   ┆ "audi"   ┆ 4         ┆ "apple"        ┆ 2         ┆ "beetle"     │
+        ├╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+        │ 3   ┆ "apple"  ┆ 3   ┆ "beetle" ┆ 3         ┆ "apple"        ┆ 3         ┆ "beetle"     │
+        ├╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+        │ 4   ┆ "apple"  ┆ 2   ┆ "beetle" ┆ 2         ┆ "banana"       ┆ 4         ┆ "audi"       │
+        ├╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+        │ 5   ┆ "banana" ┆ 1   ┆ "beetle" ┆ 1         ┆ "banana"       ┆ 5         ┆ "beetle"     │
+        ╰─────┴──────────┴─────┴──────────┴───────────┴────────────────┴───────────┴──────────────╯
+
+        """
+        return wrap_expr(self._pyexpr.prefix(prefix))
+
+    def suffix(self, suffix: str) -> "Expr":
+        """
+        Add a suffix the to root column name of the expression.
+
+        Examples
+        --------
+
+        >>> df = pl.DataFrame(
+        >>> {
+        >>>     "A": [1, 2, 3, 4, 5],
+        >>>     "fruits": ["banana", "banana", "apple", "apple", "banana"],
+        >>>     "B": [5, 4, 3, 2, 1],
+        >>>     "cars": ["beetle", "audi", "beetle", "beetle", "beetle"],
+        >>> })
+        shape: (5, 4)
+        ╭─────┬──────────┬─────┬──────────╮
+        │ A   ┆ fruits   ┆ B   ┆ cars     │
+        │ --- ┆ ---      ┆ --- ┆ ---      │
+        │ i64 ┆ str      ┆ i64 ┆ str      │
+        ╞═════╪══════════╪═════╪══════════╡
+        │ 1   ┆ "banana" ┆ 5   ┆ "beetle" │
+        ├╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┤
+        │ 2   ┆ "banana" ┆ 4   ┆ "audi"   │
+        ├╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┤
+        │ 3   ┆ "apple"  ┆ 3   ┆ "beetle" │
+        ├╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┤
+        │ 4   ┆ "apple"  ┆ 2   ┆ "beetle" │
+        ├╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┤
+        │ 5   ┆ "banana" ┆ 1   ┆ "beetle" │
+        ╰─────┴──────────┴─────┴──────────╯
+        >>> (df.select([
+        >>> pl.all(),
+        >>> pl.all().reverse().prefix("reverse_")
+        >>> ]))
+        shape: (5, 8)
+        ╭─────┬──────────┬─────┬──────────┬───────────┬────────────────┬───────────┬──────────────╮
+        │ A   ┆ fruits   ┆ B   ┆ cars     ┆ reverse_A ┆ reverse_fruits ┆ reverse_B ┆ reverse_cars │
+        │ --- ┆ ---      ┆ --- ┆ ---      ┆ ---       ┆ ---            ┆ ---       ┆ ---          │
+        │ i64 ┆ str      ┆ i64 ┆ str      ┆ i64       ┆ str            ┆ i64       ┆ str          │
+        ╞═════╪══════════╪═════╪══════════╪═══════════╪════════════════╪═══════════╪══════════════╡
+        │ 1   ┆ "banana" ┆ 5   ┆ "beetle" ┆ 5         ┆ "banana"       ┆ 1         ┆ "beetle"     │
+        ├╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+        │ 2   ┆ "banana" ┆ 4   ┆ "audi"   ┆ 4         ┆ "apple"        ┆ 2         ┆ "beetle"     │
+        ├╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+        │ 3   ┆ "apple"  ┆ 3   ┆ "beetle" ┆ 3         ┆ "apple"        ┆ 3         ┆ "beetle"     │
+        ├╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+        │ 4   ┆ "apple"  ┆ 2   ┆ "beetle" ┆ 2         ┆ "banana"       ┆ 4         ┆ "audi"       │
+        ├╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+        │ 5   ┆ "banana" ┆ 1   ┆ "beetle" ┆ 1         ┆ "banana"       ┆ 5         ┆ "beetle"     │
+        ╰─────┴──────────┴─────┴──────────┴───────────┴────────────────┴───────────┴──────────────╯
+
+        """
+        return wrap_expr(self._pyexpr.suffix(suffix))
+
     def is_not(self) -> "Expr":
         """
         Negate a boolean expression.
@@ -387,7 +547,7 @@ class Expr:
         """
         return self.filter(self.is_not_null())
 
-    def cum_sum(self, reverse: bool = False) -> "Expr":
+    def cumsum(self, reverse: bool = False) -> "Expr":
         """
         Get an array with the cumulative sum computed at every element.
 
@@ -396,9 +556,9 @@ class Expr:
         reverse
             Reverse the operation.
         """
-        return wrap_expr(self._pyexpr.cum_sum(reverse))
+        return wrap_expr(self._pyexpr.cumsum(reverse))
 
-    def cum_min(self, reverse: bool = False) -> "Expr":
+    def cummin(self, reverse: bool = False) -> "Expr":
         """
         Get an array with the cumulative min computed at every element.
 
@@ -407,9 +567,9 @@ class Expr:
         reverse
             Reverse the operation.
         """
-        return wrap_expr(self._pyexpr.cum_min(reverse))
+        return wrap_expr(self._pyexpr.cummin(reverse))
 
-    def cum_max(self, reverse: bool = False) -> "Expr":
+    def cummax(self, reverse: bool = False) -> "Expr":
         """
         Get an array with the cumulative max computed at every element.
 
@@ -418,7 +578,7 @@ class Expr:
         reverse
             Reverse the operation.
         """
-        return wrap_expr(self._pyexpr.cum_max(reverse))
+        return wrap_expr(self._pyexpr.cummax(reverse))
 
     def round(self, decimals: int) -> "Expr":
         """
@@ -517,7 +677,7 @@ class Expr:
 
         return wrap_expr(self._pyexpr.sort_by(by._pyexpr, reverse))
 
-    def take(self, index: "Expr") -> "Expr":
+    def take(self, index: Union[tp.List[int], "Expr", "pl.Series"]) -> "Expr":
         """
         Take values by index.
 
@@ -530,10 +690,15 @@ class Expr:
         -------
         Values taken by index
         """
-        index = expr_to_lit_or_expr(index, str_to_lit=False)
-        return wrap_expr(self._pyexpr.take(index._pyexpr))
+        if isinstance(index, (list, np.ndarray)):
+            index = pl.lit(pl.Series("", index, dtype=pl.UInt32))  # type: ignore
+        elif isinstance(index, pl.Series):
+            index = pl.lit(index)  # type: ignore
+        else:
+            index = expr_to_lit_or_expr(index, str_to_lit=False)  # type: ignore
+        return wrap_expr(self._pyexpr.take(index._pyexpr))  # type: ignore
 
-    def shift(self, periods: int) -> "Expr":
+    def shift(self, periods: int = 1) -> "Expr":
         """
         Shift the values by a given period and fill the parts that will be empty due to this operation
         with `Nones`.
@@ -557,15 +722,15 @@ class Expr:
         fill_value
             Fill None values with the result of this expression.
         """
+        fill_value = expr_to_lit_or_expr(fill_value, str_to_lit=True)
         return wrap_expr(self._pyexpr.shift_and_fill(periods, fill_value._pyexpr))
 
-    def fill_none(self, fill_value: Union[str, int, float, "Expr"]) -> "Expr":
+    def fill_null(self, fill_value: Union[str, int, float, "Expr"]) -> "Expr":
         """
         Fill none value with a fill value
         """
-        if not isinstance(fill_value, Expr):
-            fill_value = lit(fill_value)
-        return wrap_expr(self._pyexpr.fill_none(fill_value._pyexpr))
+        fill_value = expr_to_lit_or_expr(fill_value, str_to_lit=True)
+        return wrap_expr(self._pyexpr.fill_null(fill_value._pyexpr))
 
     def forward_fill(self) -> "Expr":
         """
@@ -743,7 +908,7 @@ class Expr:
     def filter(self, predicate: "Expr") -> "Expr":
         """
         Filter a single column.
-        Should be used in aggregation context. If you want to filter on a DataFrame level, use `LazyFrame.filter`.
+        Mostly useful in in aggregation context. If you want to filter on a DataFrame level, use `LazyFrame.filter`.
 
         Parameters
         ----------
@@ -752,10 +917,15 @@ class Expr:
         """
         return wrap_expr(self._pyexpr.filter(predicate._pyexpr))
 
+    def where(self, predicate: "Expr") -> "Expr":
+        "alias for filter"
+        return self.filter(predicate)
+
     def map(
         self,
-        f: Union["UDF", Callable[["pl.Series"], "pl.Series"]],
+        f: Callable[["pl.Series"], "pl.Series"],
         return_dtype: Optional[Type[DataType]] = None,
+        agg_list: bool = False,
     ) -> "Expr":
         """
         Apply a custom python function. This function must produce a `Series`. Any other value will be stored as
@@ -770,9 +940,6 @@ class Expr:
         return_dtype
             Dtype of the output Series.
         """
-        if isinstance(f, UDF):
-            return_dtype = f.return_dtype
-            f = f.f
         if return_dtype == str:
             return_dtype = Utf8
         elif return_dtype == int:
@@ -781,7 +948,7 @@ class Expr:
             return_dtype = Float64
         elif return_dtype == bool:
             return_dtype = Boolean
-        return wrap_expr(self._pyexpr.map(f, return_dtype))
+        return wrap_expr(self._pyexpr.map(f, return_dtype, agg_list))
 
     def apply(
         self,
@@ -839,7 +1006,20 @@ class Expr:
         def wrap_f(x: "pl.Series") -> "pl.Series":
             return x.apply(f, return_dtype=return_dtype)
 
-        return self.map(wrap_f)
+        return self.map(wrap_f, agg_list=True)
+
+    def flatten(self) -> "Expr":
+        """
+        Alias for explode.
+
+        Explode a list or utf8 Series. This means that every item is expanded to a new row.
+
+        Returns
+        -------
+        Exploded Series of same dtype
+        """
+
+        return wrap_expr(self._pyexpr.explode())
 
     def explode(self) -> "Expr":
         """
@@ -943,6 +1123,13 @@ class Expr:
         """
         return ExprStringNameSpace(self)
 
+    @property
+    def arr(self) -> "ExprListNameSpace":
+        """
+        Create an object namespace of all datetime related methods.
+        """
+        return ExprListNameSpace(self)
+
     def hash(self, k0: int = 0, k1: int = 1, k2: int = 2, k3: int = 3) -> "pl.Expr":
         """
         Hash the Series.
@@ -976,6 +1163,310 @@ class Expr:
         """
         return wrap_expr(self._pyexpr.reinterpret(signed))
 
+    def inspect(self, fmt: str = "{}") -> "pl.Expr":  # type: ignore
+        """
+        Prints the value that this expression evaluates to and passes on the value.
+
+        >>> df.select(col("foo").cumsum().inspect("value is: {}").alias("bar"))
+        """
+
+        def inspect(s: "pl.Series") -> "pl.Series":
+            print(fmt.format(s))  # type: ignore
+            return s
+
+        return self.map(inspect, return_dtype=None, agg_list=True)
+
+    def interpolate(self) -> "pl.Expr":
+        """
+        Interpolate intermediate values. The interpolation method is linear.
+        """
+        return wrap_expr(self._pyexpr.interpolate())
+
+    def rolling_min(
+        self,
+        window_size: int,
+        weight: Optional[tp.List[float]] = None,
+        ignore_null: bool = True,
+        min_periods: Optional[int] = None,
+    ) -> "Expr":
+        """
+        apply a rolling min (moving min) over the values in this array.
+        A window of length `window_size` will traverse the array. The values that fill this window
+        will (optionally) be multiplied with the weights given by the `weight` vector. The resultingParameters
+        values will be aggregated to their sum.
+
+        window_size
+            The length of the window.
+        weight
+            An optional slice with the same length of the window that will be multiplied
+            elementwise with the values in the window.
+        ignore_null
+            Toggle behavior of aggregation regarding null values in the window.
+              `True` -> Null values will be ignored.
+              `False` -> Any Null in the window leads to a Null in the aggregation result.
+        min_periods
+            The number of values in the window that should be non-null before computing a result.
+            If None, it will be set equal to window size.
+        """
+        if min_periods is None:
+            min_periods = window_size
+        return wrap_expr(
+            self._pyexpr.rolling_min(window_size, weight, ignore_null, min_periods)
+        )
+
+    def rolling_max(
+        self,
+        window_size: int,
+        weight: Optional[tp.List[float]] = None,
+        ignore_null: bool = True,
+        min_periods: Optional[int] = None,
+    ) -> "Expr":
+        """
+        Apply a rolling max (moving max) over the values in this array.
+        A window of length `window_size` will traverse the array. The values that fill this window
+        will (optionally) be multiplied with the weights given by the `weight` vector. The resultingParameters
+        values will be aggregated to their sum.
+
+        window_size
+            The length of the window.
+        weight
+            An optional slice with the same length of the window that will be multiplied
+            elementwise with the values in the window.
+        ignore_null
+            Toggle behavior of aggregation regarding null values in the window.
+              `True` -> Null values will be ignored.
+              `False` -> Any Null in the window leads to a Null in the aggregation result.
+        min_periods
+            The number of values in the window that should be non-null before computing a result.
+            If None, it will be set equal to window size.
+        """
+        if min_periods is None:
+            min_periods = window_size
+        return wrap_expr(
+            self._pyexpr.rolling_max(window_size, weight, ignore_null, min_periods)
+        )
+
+    def rolling_mean(
+        self,
+        window_size: int,
+        weight: Optional[tp.List[float]] = None,
+        ignore_null: bool = True,
+        min_periods: Optional[int] = None,
+    ) -> "Expr":
+        """
+        Apply a rolling mean (moving mean) over the values in this array.
+        A window of length `window_size` will traverse the array. The values that fill this window
+        will (optionally) be multiplied with the weights given by the `weight` vector. The resultingParameters
+        values will be aggregated to their sum.
+
+        window_size
+            The length of the window.
+        weight
+            An optional slice with the same length of the window that will be multiplied
+            elementwise with the values in the window.
+        ignore_null
+            Toggle behavior of aggregation regarding null values in the window.
+              `True` -> Null values will be ignored.
+              `False` -> Any Null in the window leads to a Null in the aggregation result.
+        min_periods
+            The number of values in the window that should be non-null before computing a result.
+            If None, it will be set equal to window size.
+        """
+        if min_periods is None:
+            min_periods = window_size
+        return wrap_expr(
+            self._pyexpr.rolling_mean(window_size, weight, ignore_null, min_periods)
+        )
+
+    def rolling_sum(
+        self,
+        window_size: int,
+        weight: Optional[tp.List[float]] = None,
+        ignore_null: bool = True,
+        min_periods: Optional[int] = None,
+    ) -> "Expr":
+        """
+        Apply a rolling sum (moving sum) over the values in this array.
+        A window of length `window_size` will traverse the array. The values that fill this window
+        will (optionally) be multiplied with the weights given by the `weight` vector. The resultingParameters
+        values will be aggregated to their sum.
+
+        window_size
+            The length of the window.
+        weight
+            An optional slice with the same length of the window that will be multiplied
+            elementwise with the values in the window.
+        ignore_null
+            Toggle behavior of aggregation regarding null values in the window.
+              `True` -> Null values will be ignored.
+              `False` -> Any Null in the window leads to a Null in the aggregation result.
+        min_periods
+            The number of values in the window that should be non-null before computing a result.
+            If None, it will be set equal to window size.
+        """
+        if min_periods is None:
+            min_periods = window_size
+        return wrap_expr(
+            self._pyexpr.rolling_sum(window_size, weight, ignore_null, min_periods)
+        )
+
+    def rolling_apply(
+        self, window_size: int, function: Callable[["pl.Series"], Any]
+    ) -> "Expr":
+        """
+        Allows a custom rolling window function.
+        Prefer the specific rolling window fucntions over this one, as they are faster.
+
+        Prefer:
+            * rolling_min
+            * rolling_max
+            * rolling_mean
+            * rolling_sum
+
+        Parameters
+        ----------
+        window_size
+            Size of the rolling window
+        function
+            Aggregation function
+
+
+        Examples
+        --------
+
+        >>> df = pl.DataFrame(
+        >>>     {
+        >>>         "A": [1.0, 2.0, 9.0, 2.0, 13.0],
+        >>>     }
+        >>> )
+        >>> df.select([
+        >>>     col("A").rolling_apply(3, lambda s: s.std())
+        >>> ])
+        shape: (5, 1)
+        ┌────────────────────┐
+        │ A                  │
+        │ ---                │
+        │ f64                │
+        ╞════════════════════╡
+        │ null               │
+        ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+        │ null               │
+        ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+        │ 4.358898943540674  │
+        ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+        │ 4.041451884327381  │
+        ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+        │ 5.5677643628300215 │
+        └────────────────────┘
+
+        """
+        return wrap_expr(self._pyexpr.rolling_apply(window_size, function))
+
+    def abs(self) -> "Expr":
+        """
+        Take absolute values
+        """
+        return self.map(lambda s: s.abs())
+
+    def argsort(self, reverse: bool = False) -> "Expr":
+        """
+        Index location of the sorted variant of this Series.
+        Parameters
+        ----------
+        reverse
+            Reverse the ordering. Default is from low to high.
+        """
+        return pl.argsort_by([self], [reverse])  # type: ignore
+
+    def rank(self, method: str = "average") -> "Expr":  # type: ignore
+        """
+        Assign ranks to data, dealing with ties appropriately.
+
+        Parameters
+        ----------
+        method
+            {'average', 'min', 'max', 'dense', 'ordinal'}, optional
+            The method used to assign ranks to tied elements.
+            The following methods are available (default is 'average'):
+              * 'average': The average of the ranks that would have been assigned to
+                all the tied values is assigned to each value.
+              * 'min': The minimum of the ranks that would have been assigned to all
+                the tied values is assigned to each value.  (This is also
+                referred to as "competition" ranking.)
+              * 'max': The maximum of the ranks that would have been assigned to all
+                the tied values is assigned to each value.
+              * 'dense': Like 'min', but the rank of the next highest element is
+                assigned the rank immediately after those assigned to the tied
+                elements.
+              * 'ordinal': All values are given a distinct rank, corresponding to
+                the order that the values occur in `a`.
+        """
+        return wrap_expr(self._pyexpr.rank(method))
+
+    def diff(self, n: int = 1, null_behavior: str = "ignore") -> "Expr":  # type: ignore
+        """
+        Calculate the n-th discrete difference.
+
+        Parameters
+        ----------
+        n
+            number of slots to shift
+        null_behavior
+            {'ignore', 'drop'}
+        """
+        return wrap_expr(self._pyexpr.diff(n, null_behavior))
+
+
+class ExprListNameSpace:
+    """
+    Namespace for list related expressions
+    """
+
+    def __init__(self, expr: Expr):
+        self._pyexpr = expr._pyexpr
+
+    def sum(self) -> "Expr":
+        """
+        Sum all the arrays in the list
+        """
+        return wrap_expr(self._pyexpr.lst_sum())
+
+    def max(self) -> "Expr":
+        """
+        Compute the max value of the arrays in the list
+        """
+        return wrap_expr(self._pyexpr.lst_max())
+
+    def min(self) -> "Expr":
+        """
+        Compute the min value of the arrays in the list
+        """
+        return wrap_expr(self._pyexpr.lst_min())
+
+    def mean(self) -> "Expr":
+        """
+        Compute the mean value of the arrays in the list
+        """
+        return wrap_expr(self._pyexpr.lst_mean())
+
+    def sort(self, reverse: bool) -> "Expr":
+        """
+        Sort the arrays in the list
+        """
+        return wrap_expr(self._pyexpr.lst_sort(reverse))
+
+    def reverse(self) -> "Expr":
+        """
+        Reverse the arrays in the list
+        """
+        return wrap_expr(self._pyexpr.lst_reverse())
+
+    def unique(self) -> "Expr":
+        """
+        Get the unique/distinct values in the list
+        """
+        return wrap_expr(self._pyexpr.lst_unique())
+
 
 class ExprStringNameSpace:
     """
@@ -1006,17 +1497,6 @@ class ExprStringNameSpace:
             return wrap_expr(self._pyexpr.str_parse_date64(fmt))
         else:
             raise NotImplementedError
-
-    def parse_date(
-        self,
-        datatype: Union[Date32, Date64],
-        fmt: Optional[str] = None,
-    ) -> Expr:
-        """
-        .. deprecated:: 0.8.7
-        use `strptime`
-        """
-        return self.strptime(datatype, fmt)
 
     def lengths(self) -> Expr:
         """
@@ -1167,6 +1647,33 @@ class ExprDateTimeNameSpace:
         """
         return wrap_expr(self._pyexpr.month())
 
+    def week(self) -> Expr:
+        """
+        Extract the week from the underlying Date representation.
+        Can be performed on Date32 and Date64
+
+        Returns the ISO week number starting from 1.
+        The return value ranges from 1 to 53. (The last week of year differs by years.)
+
+        Returns
+        -------
+        Week number as UInt32
+        """
+        return wrap_expr(self._pyexpr.week())
+
+    def weekday(self) -> Expr:
+        """
+        Extract the week day from the underlying Date representation.
+        Can be performed on Date32 and Date64.
+
+        Returns the weekday number where monday = 0 and sunday = 6
+
+        Returns
+        -------
+        Week day as UInt32
+        """
+        return wrap_expr(self._pyexpr.weekday())
+
     def day(self) -> Expr:
         """
         Extract day from underlying Date representation.
@@ -1270,6 +1777,18 @@ class ExprDateTimeNameSpace:
         """
         return wrap_expr(self._pyexpr).map(lambda s: s.dt.round(rule, n), None)
 
+    def to_python_datetime(self) -> Expr:
+        """
+        Go from Date32/Date64 to python DateTime objects
+        """
+        return wrap_expr(self._pyexpr).map(
+            lambda s: s.dt.to_python_datetime(), return_dtype=pl.Object
+        )
+
+    def timestamp(self) -> Expr:
+        """Return timestamp in ms as Int64 type."""
+        return wrap_expr(self._pyexpr.timestamp())
+
 
 def expr_to_lit_or_expr(
     expr: Union[Expr, int, float, str, tp.List[Expr]], str_to_lit: bool = True
@@ -1291,7 +1810,7 @@ def expr_to_lit_or_expr(
     """
     if isinstance(expr, str) and not str_to_lit:
         return col(expr)
-    elif isinstance(expr, (int, float, str)):
+    elif isinstance(expr, (int, float, str)) or expr is None:
         return lit(expr)
     elif isinstance(expr, list):
         return [expr_to_lit_or_expr(e, str_to_lit=str_to_lit) for e in expr]  # type: ignore[return-value]

@@ -85,9 +85,9 @@ Computations
 .. autosummary::
    :toctree: api/
 
-    Series.cum_sum
-    Series.cum_min
-    Series.cum_max
+    Series.cumsum
+    Series.cummin
+    Series.cummax
     Series.arg_sort
     Series.arg_true
     Series.arg_unique
@@ -96,10 +96,14 @@ Computations
     Series.rolling_max
     Series.rolling_mean
     Series.rolling_sum
+    Series.rolling_apply
     Series.hash
     Series.peak_max
     Series.peak_min
     Series.dot
+    Series.abs
+    Series.rank
+    Series.diff
 
 Manipulation/ selection
 -----------------------
@@ -129,8 +133,9 @@ Manipulation/ selection
     Series.cast
     Series.round
     Series.set_at_idx
-    Series.fill_none
+    Series.fill_null
     Series.zip_with
+    Series.interpolate
 
 Various
 --------
@@ -193,3 +198,21 @@ The following methods are available under the `Series.str` attribute.
     StringNameSpace.rstrip
     StringNameSpace.lstrip
     StringNameSpace.slice
+
+Lists
+-----
+
+The following methods are available under the `Series.arr` attribute.
+
+.. currentmodule:: polars.eager.series
+
+.. autosummary::
+   :toctree: api/
+
+    ListNameSpace.sum
+    ListNameSpace.min
+    ListNameSpace.max
+    ListNameSpace.mean
+    ListNameSpace.sort
+    ListNameSpace.reverse
+    ListNameSpace.unique

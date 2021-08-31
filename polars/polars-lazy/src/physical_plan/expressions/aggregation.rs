@@ -21,17 +21,24 @@ impl AggregationExpr {
 }
 
 impl PhysicalExpr for AggregationExpr {
+    fn as_expression(&self) -> &Expr {
+        unimplemented!()
+    }
+
     fn evaluate(&self, _df: &DataFrame, _state: &ExecutionState) -> Result<Series> {
         unimplemented!()
     }
     #[allow(clippy::ptr_arg)]
     fn evaluate_on_groups<'a>(
         &self,
-        _df: &DataFrame,
-        _groups: &'a GroupTuples,
-        _state: &ExecutionState,
-    ) -> Result<(Series, Cow<'a, GroupTuples>)> {
-        unimplemented!()
+        df: &DataFrame,
+        groups: &'a GroupTuples,
+        state: &ExecutionState,
+    ) -> Result<AggregationContext<'a>> {
+        let out = self.aggregate(df, groups, state)?.ok_or_else(|| {
+            PolarsError::ComputeError("Aggregation did not return a Series".into())
+        })?;
+        Ok(AggregationContext::new(out, Cow::Borrowed(groups)))
     }
 
     fn to_field(&self, input_schema: &Schema) -> Result<Field> {
@@ -59,48 +66,48 @@ impl PhysicalAggregation for AggregationExpr {
         groups: &GroupTuples,
         state: &ExecutionState,
     ) -> Result<Option<Series>> {
-        let (series, groups) = self.expr.evaluate_on_groups(df, groups, state)?;
-        let new_name = fmt_groupby_column(series.name(), self.agg_type);
+        let mut ac = self.expr.evaluate_on_groups(df, groups, state)?;
+        let new_name = fmt_groupby_column(ac.series().name(), self.agg_type);
 
         match self.agg_type {
             GroupByMethod::Min => {
-                let agg_s = series.agg_min(&groups);
+                let agg_s = ac.flat().into_owned().agg_min(ac.groups());
                 Ok(rename_option_series(agg_s, &new_name))
             }
             GroupByMethod::Max => {
-                let agg_s = series.agg_max(&groups);
+                let agg_s = ac.flat().into_owned().agg_max(ac.groups());
                 Ok(rename_option_series(agg_s, &new_name))
             }
             GroupByMethod::Median => {
-                let agg_s = series.agg_median(&groups);
+                let agg_s = ac.flat().into_owned().agg_median(ac.groups());
                 Ok(rename_option_series(agg_s, &new_name))
             }
             GroupByMethod::Mean => {
-                let agg_s = series.agg_mean(&groups);
+                let agg_s = ac.flat().into_owned().agg_mean(ac.groups());
                 Ok(rename_option_series(agg_s, &new_name))
             }
             GroupByMethod::Sum => {
-                let agg_s = series.agg_sum(&groups);
+                let agg_s = ac.flat().into_owned().agg_sum(ac.groups());
                 Ok(rename_option_series(agg_s, &new_name))
             }
             GroupByMethod::Count => {
                 let mut ca: NoNull<UInt32Chunked> =
-                    groups.iter().map(|(_, g)| g.len() as u32).collect();
+                    ac.groups().iter().map(|(_, g)| g.len() as u32).collect();
                 ca.rename(&new_name);
                 Ok(Some(ca.into_inner().into_series()))
             }
             GroupByMethod::First => {
-                let mut agg_s = series.agg_first(&groups);
+                let mut agg_s = ac.flat().into_owned().agg_first(ac.groups());
                 agg_s.rename(&new_name);
                 Ok(Some(agg_s))
             }
             GroupByMethod::Last => {
-                let mut agg_s = series.agg_last(&groups);
+                let mut agg_s = ac.flat().into_owned().agg_last(ac.groups());
                 agg_s.rename(&new_name);
                 Ok(Some(agg_s))
             }
             GroupByMethod::NUnique => {
-                let opt_agg = series.agg_n_unique(&groups);
+                let opt_agg = ac.flat().into_owned().agg_n_unique(ac.groups());
                 let opt_agg = opt_agg.map(|mut agg| {
                     agg.rename(&new_name);
                     agg.into_series()
@@ -108,11 +115,12 @@ impl PhysicalAggregation for AggregationExpr {
                 Ok(opt_agg)
             }
             GroupByMethod::List => {
-                let opt_agg = series.agg_list(&groups);
-                Ok(rename_option_series(opt_agg, &new_name))
+                let agg = ac.aggregated().into_owned();
+                Ok(rename_option_series(Some(agg), &new_name))
             }
             GroupByMethod::Groups => {
-                let mut column: ListChunked = groups
+                let mut column: ListChunked = ac
+                    .groups()
                     .iter()
                     .map(|(_first, idx)| {
                         let ca: NoNull<UInt32Chunked> = idx.iter().map(|&v| v as u32).collect();
@@ -124,11 +132,11 @@ impl PhysicalAggregation for AggregationExpr {
                 Ok(Some(column.into_series()))
             }
             GroupByMethod::Std => {
-                let agg_s = series.agg_std(&groups);
+                let agg_s = ac.flat().into_owned().agg_std(ac.groups());
                 Ok(rename_option_series(agg_s, &new_name))
             }
             GroupByMethod::Var => {
-                let agg_s = series.agg_var(&groups);
+                let agg_s = ac.flat().into_owned().agg_var(ac.groups());
                 Ok(rename_option_series(agg_s, &new_name))
             }
             GroupByMethod::Quantile(_) => {
@@ -213,7 +221,7 @@ impl PhysicalAggregation for AggregationExpr {
                     // Safety
                     // The indexes of the groupby operation are never out of bounds
                     let ca = unsafe { ca.take_unchecked(idx.iter().map(|i| *i as usize).into()) };
-                    let s = ca.explode_and_offsets()?.0;
+                    let s = ca.explode()?;
                     builder.append_series(&s);
                 }
                 let out = builder.finish();
@@ -270,6 +278,10 @@ impl AggQuantileExpr {
 }
 
 impl PhysicalExpr for AggQuantileExpr {
+    fn as_expression(&self) -> &Expr {
+        unimplemented!()
+    }
+
     fn evaluate(&self, _df: &DataFrame, _state: &ExecutionState) -> Result<Series> {
         unimplemented!()
     }
@@ -279,7 +291,7 @@ impl PhysicalExpr for AggQuantileExpr {
         _df: &DataFrame,
         _groups: &'a GroupTuples,
         _state: &ExecutionState,
-    ) -> Result<(Series, Cow<'a, GroupTuples>)> {
+    ) -> Result<AggregationContext<'a>> {
         unimplemented!()
     }
 

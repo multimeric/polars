@@ -488,7 +488,7 @@ pub fn get_supertype(l: &DataType, r: &DataType) -> Result<DataType> {
     match _get_supertype(l, r) {
         Some(dt) => Ok(dt),
         None => _get_supertype(r, l).ok_or_else(|| {
-            PolarsError::Other(
+            PolarsError::ComputeError(
                 format!("Failed to determine supertype of {:?} and {:?}", l, r).into(),
             )
         }),
@@ -533,11 +533,11 @@ fn _get_supertype(l: &DataType, r: &DataType) -> Option<DataType> {
         (UInt8, Int32) => Some(Int32),
         (UInt8, Int64) => Some(Int64),
 
-        (UInt16, Int16) => Some(Int16),
+        (UInt16, Int16) => Some(Int32),
         (UInt16, Int32) => Some(Int32),
         (UInt16, Int64) => Some(Int64),
 
-        (UInt32, Int32) => Some(Int32),
+        (UInt32, Int32) => Some(Int64),
         (UInt32, Int64) => Some(Int64),
 
         (UInt64, Int64) => Some(Int64),
@@ -866,4 +866,11 @@ pub(crate) fn index_to_chunked_index<
         }
     }
     (current_chunk_idx, index_remainder)
+}
+
+/// # SAFETY
+/// `dst` must be valid for `dst.len()` elements, and `src` and `dst` may not overlap.
+#[inline]
+pub(crate) unsafe fn copy_from_slice_unchecked<T>(src: &[T], dst: &mut [T]) {
+    std::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr(), dst.len());
 }

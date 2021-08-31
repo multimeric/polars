@@ -31,6 +31,7 @@ Manipulation/ selection
 .. autosummary::
    :toctree: api/
 
+    LazyFrame.inspect
     LazyFrame.filter
     LazyFrame.select
     LazyFrame.groupby
@@ -49,12 +50,14 @@ Manipulation/ selection
     LazyFrame.tail
     LazyFrame.last
     LazyFrame.first
-    LazyFrame.fill_none
+    LazyFrame.fill_null
+    LazyFrame.fill_nan
     LazyFrame.explode
     LazyFrame.drop_duplicates
     LazyFrame.drop_nulls
     LazyFrame.sort
     LazyFrame.melt
+    LazyFrame.interpolate
 
 Apply
 -----

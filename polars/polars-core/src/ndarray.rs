@@ -1,6 +1,7 @@
 use crate::prelude::*;
 use ndarray::prelude::*;
 use std::convert::{From, TryFrom};
+use ndarray::Data;
 
 impl<T> ChunkedArray<T>
 where
@@ -123,6 +124,18 @@ impl DataFrame {
                 })
         }
         Ok(ndarr)
+    }
+}
+
+impl<D, T> TryFrom<DataFrame> for ArrayBase<D, Ix2>
+    where
+        D: Data<Elem=T>,
+        T: ToPolarsType
+{
+    type Error = PolarsError;
+    fn try_from(d: DataFrame) -> Result<Self> {
+        let polars_type = T::to_polars_type();
+        d.to_ndarray::<polars_type>()
     }
 }
 
